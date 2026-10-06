@@ -510,3 +510,126 @@ prompt (self, name: 'str | None' = None, title: 'str | None' = None, ...)
 ### 次の判断
 文書の射程拡張は完了。§8 のコード例は未実行であり、
 Resources / Prompts を実際に使う Skill を移植する機会に検証する。
+
+---
+
+## Step 12: GitHub リポジトリの作成と push
+
+### 目的
+成果物一式を GitHub リポジトリとして公開する。
+
+### 背景
+作業ディレクトリ `/Users/kono/gitrepo/mcp-demo` は git リポジトリではなかった
+（セッション開始時の環境情報および `git status` の
+`fatal: not a git repository` で確認済み）。
+ユーザーから `gh` コマンドでのリポジトリ作成と push の依頼があった。
+
+### 事前仮説
+- `.venv/` が 72 MB あり、そのままでは不要なものを push してしまう → `.gitignore` が要る
+- 公開範囲は外部に出る不可逆な判断なので、ユーザーに確認すべき
+- 公開リポジトリに秘密情報が含まれていないか、事前に走査すべき
+
+### 破壊的操作の事前記録
+- **操作対象**: GitHub 上の新規リポジトリ `konono/mcp-demo`、およびローカルの git 初期化
+- **操作目的**: 成果物の公開
+- **影響範囲**: 外部（GitHub）。公開リポジトリは第三者から参照され、
+  キャッシュやインデックスに残りうる
+- **破壊的か**: 既存データの破壊はない。ただし**公開は不可逆**
+  （削除してもキャッシュ・フォーク・インデックスは消えない）
+- **事前確認した状態**: `gh auth status` で konono としてログイン済み、
+  既存の同名リポジトリは `gh repo create` が失敗しないことで非存在を確認
+- **復旧方法**: `gh repo delete konono/mcp-demo`。
+  ただし公開済みの内容は取り消せない
+- **実行後に確認する状態**: リポジトリの visibility、ルート直下のファイル一覧、
+  `.venv` が含まれていないこと
+
+### 実行内容
+
+**操作 1: 認証と現状の確認**
+```
+gh auth status  → Logged in to github.com account konono (GITHUB_TOKEN)
+git status      → fatal: not a git repository
+du -sh search-mcp/.venv → 72M
+```
+
+**操作 2: 秘密情報の走査**
+```
+grep -rniE "(gho_|ghp_|BEGIN .*PRIVATE KEY|password|api[_-]?key *[:=])" .
+```
+→ `.venv/` と `__pycache__` を除外した結果、**該当なし**。
+`deploy/openshift/secret.example.yaml` はプレースホルダのみで、
+kustomization の resources からも外してある（Step 7 の判断）。
+
+**操作 3: ユーザーへの確認（AskUserQuestion）**
+- 公開範囲 → **public**（ユーザー選択）
+- `.tracecraft/` を含めるか → **含める**（ユーザー選択）
+
+**変更 1: `/Users/kono/gitrepo/mcp-demo/.gitignore` を新規作成**
+`__pycache__/`, `.venv/`, `dist/`, `*.egg-info/`, `.pytest_cache/`,
+`.env`, `*.secret.yaml` を除外。
+`secret.example.yaml` はプレースホルダなので**追跡対象のまま**にし、
+その旨をコメントに明記した。
+
+**変更 2: `/Users/kono/gitrepo/mcp-demo/README.md` を新規作成**
+リポジトリルートに README が無く、公開すると入口が無い状態だったため作成。
+Skill 版と MCP 版の対比表、`docs/skill-to-mcp.md` を主眼として提示、
+ドキュメント索引、`.tracecraft` への導線、すぐ動かす手順、構成図、
+**検証状況の表（API スキーマ検証が未実施であることを ❌ で明示）** を含めた。
+
+**操作 4: git 初期化とコミット**
+```
+git init -b main && git add -A
+git -c user.name=... -c user.email=... commit -F - <<...
+```
+
+**操作 5: リポジトリ作成と push**
+```
+gh repo create mcp-demo --public --source=. --remote=origin --push --description "..."
+```
+
+### 期待結果
+- 追跡ファイルが 60〜70 件、合計 1 MB 未満（`.venv` が除外されている）
+- public リポジトリが作成され、main ブランチが push される
+
+### 実際の結果
+
+`git status --short | wc -l` → **68 ファイル**
+`git ls-files | xargs du -ch | tail -1` → **764K**
+
+`.tracecraft/` は今回のセッション（`13f2e00f`）だけでなく、
+`search-demo` 自体を作った過去 3 セッション分
+（`4f25b8be_mise-toml-seiritsu`, `dd86561f_pyproject-toml`,
+`fef304fd_public-api-search-demo`）も含まれていた。
+いずれも秘密情報の走査済み範囲内なのでそのまま含めた。
+
+コミット: `a028ac8 Add MCP HTTP server, container, and OpenShift manifests for search-demo`
+
+push 出力:
+```
+https://github.com/konono/mcp-demo
+To https://github.com/konono/mcp-demo.git
+ * [new branch]      HEAD -> main
+branch 'main' set up to track 'origin/main'.
+```
+
+事後確認:
+```
+gh repo view --json url,visibility,defaultBranchRef
+  → https://github.com/konono/mcp-demo / PUBLIC / main
+gh api repos/konono/mcp-demo/contents --jq '.[].name'
+  → .dockerignore .gitignore Containerfile README.md mise.toml search-demo search-mcp
+```
+`.venv` がリモートに存在しないことを確認。
+
+### 解釈
+事実: public リポジトリとして公開され、追跡内容は意図したものと一致している。
+事実: 秘密情報の走査で該当は無く、`secret.example.yaml` はプレースホルダのみ。
+
+推測: `.tracecraft/` の過去 3 セッション分も公開対象になったが、
+ユーザーの「含める」という選択は今回のセッション分を念頭に置いたものだった可能性がある。
+内容はいずれも `search-demo` の作成過程であり、秘密情報は含まれていないため
+そのままとしたが、ユーザーに事実として報告する。
+
+### 次の判断
+この Step 12 とフェーズ 12 の記録自体が未コミットなので、追記後に 2 つ目の
+コミットとして push する。

@@ -684,3 +684,90 @@ $ grep -c '' /Users/kono/gitrepo/mcp-demo/search-mcp/docs/skill-to-mcp.md
 ```
 
 （改訂前は 276 行）
+
+---
+
+## Phase 12: GitHub リポジトリの作成と push
+
+### 認証と現状確認
+
+```
+$ gh auth status
+github.com
+  ✓ Logged in to github.com account konono (GITHUB_TOKEN)
+  - Active account: true
+  - Git operations protocol: https
+  - Token: <REDACTED>
+
+$ git status
+fatal: not a git repository (or any parent up to mount point /Users/kono/gitrepo)
+
+$ ls -a
+.  ..  .dockerignore  Containerfile  mise.toml  search-demo  search-mcp
+```
+
+### 秘密情報の走査
+
+```
+$ grep -rniE "(gho_|ghp_|BEGIN .*PRIVATE KEY|password|api[_-]?key *[:=])" --include='*' . \
+    | grep -v '\.venv/' | grep -v '__pycache__' | head -20
+（出力なし）
+```
+
+### サイズ確認
+
+```
+$ du -sh search-mcp/* search-mcp/.venv | sort -h | tail -5
+48K	search-mcp/deploy
+56K	search-mcp/docs
+68K	search-mcp/src
+252K	search-mcp/uv.lock
+72M	search-mcp/.venv
+```
+
+→ `.venv` を除外する `.gitignore` が必須と判断。
+
+### git 初期化とステージング
+
+```
+$ git init -q -b main && git add -A && git status --short | wc -l
+68
+
+$ git ls-files | xargs du -ch 2>/dev/null | tail -1
+764K	total
+```
+
+### コミット
+
+```
+$ git -c user.name="konono" -c user.email="konono@users.noreply.github.com" commit -q -F - <<'MSG'
+Add MCP HTTP server, container, and OpenShift manifests for search-demo
+...
+MSG
+
+$ git log --oneline
+a028ac8 Add MCP HTTP server, container, and OpenShift manifests for search-demo
+```
+
+### リポジトリ作成と push
+
+```
+$ gh repo create mcp-demo --public --source=. --remote=origin --push \
+    --description "opencode の Skill を MCP サーバーに移植するリファレンス実装 — 移植知識・コンテナ・OpenShift マニフェスト・作業記録つき"
+https://github.com/konono/mcp-demo
+To https://github.com/konono/mcp-demo.git
+ * [new branch]      HEAD -> main
+branch 'main' set up to track 'origin/main'.
+```
+
+### 事後確認
+
+```
+$ gh repo view --json url,visibility,defaultBranchRef -q '.url, .visibility, .defaultBranchRef.name'
+https://github.com/konono/mcp-demo
+PUBLIC
+main
+
+$ gh api repos/konono/mcp-demo/contents --jq '.[].name' | tr '\n' ' '
+.dockerignore .gitignore Containerfile README.md mise.toml search-demo search-mcp
+```
