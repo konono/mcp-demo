@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "search-mcp"
+version = "1.0.0"
+description = "search-demo の公開 API 横断検索を MCP (Streamable HTTP) サーバーとして公開する"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # MCP Python SDK 2.x。1.x の FastMCP は MCPServer に改名されており、本実装は 2.x 前提。
+    "mcp>=2.3,<3",
+    # Streamable HTTP は ASGI。uvicorn を本番サーバーとして使う。
+    "uvicorn[standard]>=0.38",
+    # 検索ロジックの本体。二重管理を避けるため search-demo をそのまま依存に取る。
+    "search-demo==1.0.0",
+]
+
+[project.scripts]
+search-mcp = "search_mcp.__main__:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=1.0", "httpx>=0.28"]
+
+# search-demo はリポジトリ内のローカルパッケージ。PyPI には存在しないので uv に場所を教える。
+# コンテナビルドでは build context をリポジトリルートにしてこの相対パスを解決する。
+[tool.uv.sources]
+search-demo = { path = "../search-demo" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/search_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

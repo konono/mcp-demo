@@ -1,0 +1,6 @@
+[tools]
+# README の手順 (mise x -- python search_demo.py) を動かすためのランタイム。
+# pyproject.toml の requires-python = ">=3.10" を満たす。
+python = "3.12"
+# ビルド・パッケージング用。再現性のためバージョンを固定する。
+uv = "0.12.23"

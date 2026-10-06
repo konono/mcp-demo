@@ -1,0 +1,9 @@
+[tools]
+# search-demo / search-mcp 共通のランタイム。
+python = "3.12"
+uv = "0.12.23"
+
+# コンテナイメージのビルドと動作確認に使う（DooD 経由で /run/container.sock に接続）。
+podman = "6.1.3"
+# OpenShift マニフェストの kustomize build / 検証に使う。
+kubectl = "latest"

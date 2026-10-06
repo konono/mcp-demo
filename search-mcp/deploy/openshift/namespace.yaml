@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: search-mcp
+  labels:
+    app.kubernetes.io/name: search-mcp
+    # 自分自身のラベル。他 namespace からの NetworkPolicy 記述に使える。
+    kubernetes.io/metadata.name: search-mcp

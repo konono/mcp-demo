@@ -1,0 +1,60 @@
+# クラスタ内の agent framework から search-mcp を使う Pod の例。
+#
+# 事前に必要なこと:
+#   1. この namespace にラベルを付ける（NetworkPolicy の許可条件）
+#        oc label namespace <this-namespace> mcp-client=search-mcp
+#   2. トークンを持つ Secret を作る
+#        oc create secret generic search-mcp-client --from-literal=token=<token>
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-mcp-endpoints
+data:
+  # Route ではなく Service に直接繋ぐ。TLS 終端も CA 配布も不要で、経路も短い。
+  SEARCH_MCP_URL: "http://search-mcp.search-mcp.svc.cluster.local:8080/mcp"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  labels:
+    app.kubernetes.io/name: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: your-agent-image:latest
+          envFrom:
+            - configMapRef:
+                name: agent-mcp-endpoints
+          env:
+            - name: SEARCH_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: search-mcp-client
+                  key: token
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

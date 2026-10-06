@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "search-demo"
+version = "1.0.0"
+description = "公開 API を横断検索する Python デモスクリプトと、それを opencode から呼び出す Skill"
+readme = "README.md"
+requires-python = ">=3.10"
+# 依存ゼロ（標準ライブラリのみ）。エージェントが pip install を挟まずに即実行できるようにするため。
+dependencies = []
+
+[project.scripts]
+search-demo = "search_demo:main"
+
+[tool.hatch.build.targets.wheel]
+# パッケージではなく単一モジュール構成
+only-include = ["search_demo.py"]
+sources = ["."]
+
+[tool.hatch.build.targets.sdist]
+# 既定だと .tracecraft/ や .opencode/ まで含まれるので明示的に絞る
+only-include = ["search_demo.py", "README.md", "mise.toml"]

@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: search-mcp-config
+  labels:
+    app.kubernetes.io/name: search-mcp
+data:
+  MCP_HOST: "0.0.0.0"
+  MCP_PORT: "8080"
+  MCP_PATH: "/mcp"
+
+  # replica を増やしても sticky session 不要にするため stateless で動かす。
+  MCP_STATELESS_HTTP: "true"
+  # SSE ではなく単発 JSON で返す。Route(HAProxy) のバッファリングや
+  # idle timeout の影響を受けにくく、デモ用途では安定する。
+  # 進捗通知やサーバー発の通知が必要になったら "false" に戻す。
+  MCP_JSON_RESPONSE: "true"
+
+  # DNS rebinding 対策。Route 経由で来る Host / Origin を列挙する。
+  # ここを環境のホスト名に書き換えないと Route 経由のアクセスが 400 になる。
+  MCP_DNS_REBINDING_PROTECTION: "true"
+  MCP_ALLOWED_HOSTS: "search-mcp.apps.example.com,search-mcp.search-mcp.svc.cluster.local:8080,search-mcp:8080"
+  MCP_ALLOWED_ORIGINS: "https://search-mcp.apps.example.com"
+
+  # 未認証の外部 API を叩くので、クライアントからの件数要求に上限を設ける。
+  MCP_DEFAULT_LIMIT: "5"
+  MCP_MAX_LIMIT: "20"
+  MCP_LOG_LEVEL: "INFO"

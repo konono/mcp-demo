@@ -1,0 +1,5 @@
+[tools]
+# search-demo/mise.toml と揃える。pyproject の requires-python = ">=3.11" を満たす。
+python = "3.12"
+# 依存解決とロックファイル生成。再現性のためバージョンを固定する。
+uv = "0.12.23"

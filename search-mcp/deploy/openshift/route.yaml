@@ -1,0 +1,31 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: search-mcp
+  labels:
+    app.kubernetes.io/name: search-mcp
+  annotations:
+    # MCP の Streamable HTTP は長めのレスポンスを返しうる（SSE モード時は特に）。
+    # HAProxy の既定 30s では途中で切れるため延ばす。
+    haproxy.router.openshift.io/timeout: "120s"
+    # stateless_http=true なので cookie による固定は不要。無効化して
+    # 全 replica に均等に流す。
+    haproxy.router.openshift.io/disable_cookies: "true"
+    haproxy.router.openshift.io/balance: "roundrobin"
+spec:
+  # host を省略すると <name>-<namespace>.apps.<cluster-domain> が割り当てられる。
+  # 固定したい場合のみ指定する。ConfigMap の MCP_ALLOWED_HOSTS と必ず一致させること。
+  # host: search-mcp.apps.example.com
+  to:
+    kind: Service
+    name: search-mcp
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    # edge: Router で TLS 終端し、Pod へは平文。Pod 側に証明書を持たせずに済む。
+    # クラスタ外（virt 上の VM で動く opencode）からは必ず HTTPS で到達する。
+    # Pod 側まで暗号化が必要なポリシーなら reencrypt + Service の
+    # service.beta.openshift.io/serving-cert-secret-name に切り替える。
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "search": {
+      "type": "remote",
+      "url": "https://search-mcp-search-mcp.apps.example.com/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer {env:SEARCH_MCP_TOKEN}"
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: search-mcp
+  labels:
+    app.kubernetes.io/name: search-mcp
+spec:
+  # ノードのドレイン中もエージェントから使い続けられるようにする。
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: search-mcp

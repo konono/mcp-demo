@@ -1,0 +1,40 @@
+# クラスタ内でイメージをビルドする場合に使う（任意）。
+# 手元で podman build + push する運用なら不要なので kustomization には含めていない。
+#
+#   oc apply -f build.yaml
+#   oc start-build search-mcp --from-dir=<リポジトリルート> --follow
+#
+# --from-dir にリポジトリルートを渡すこと。Containerfile が
+# search-demo/ と search-mcp/ の両方を参照しているため。
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: search-mcp
+  labels:
+    app.kubernetes.io/name: search-mcp
+spec:
+  lookupPolicy:
+    local: true
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: search-mcp
+  labels:
+    app.kubernetes.io/name: search-mcp
+spec:
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Containerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: search-mcp:1.0.0
+  resources:
+    limits:
+      cpu: "2"
+      memory: 2Gi

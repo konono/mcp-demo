@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: search-mcp
+  labels:
+    app.kubernetes.io/name: search-mcp
+    app.kubernetes.io/component: mcp-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: search-mcp
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: search-mcp
+        app.kubernetes.io/component: mcp-server
+      annotations:
+        # ConfigMap / Secret を変えたら Pod を入れ替えたい。kustomize の
+        # configMapGenerator がハッシュ付き名前を振るので、参照名の変化で
+        # 自動的にロールアウトされる。手書き適用時はこの値を変えて再適用する。
+        rollout/trigger: "1"
+    spec:
+      serviceAccountName: search-mcp
+      # SIGTERM 後に処理中のリクエストを捌く余裕。uvicorn 側の
+      # timeout_graceful_shutdown=20 より長くしておく。
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # restricted-v2 SCC が UID を割り当てるので runAsUser は書かない。
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: search-mcp:1.0.0 # kustomize の images で上書きする
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: search-mcp-config
+          env:
+            - name: MCP_AUTH_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: search-mcp-auth
+                  key: tokens
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem のため、書き込みが要る場所だけ emptyDir を当てる。
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              # 外向き HTTP 待ちが主で CPU は食わない。メモリはリークの保険。
+              cpu: "1"
+              memory: 512Mi
+          startupProbe:
+            # 起動は数秒だが、イメージ pull 直後の遅さを許容する。
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: search-mcp

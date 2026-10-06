@@ -1,0 +1,15 @@
+# build context はリポジトリルート。イメージに不要なものを除く。
+**/.git
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/.tracecraft
+**/dist
+**/.mise
+search-mcp/tests
+search-mcp/examples
+search-mcp/docs
+search-mcp/deploy
+search-demo/.opencode

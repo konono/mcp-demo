@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: search-mcp
+
+# includeSelectors: false — version をセレクタに含めると、バージョン更新のたびに
+# Deployment の immutable な .spec.selector を書き換えることになり apply が失敗する。
+# セレクタに使う app.kubernetes.io/name は各マニフェストに直接書いてある。
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: mcp-demo
+      app.kubernetes.io/version: 1.0.0
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - route.yaml
+  - networkpolicy.yaml
+  - hpa.yaml
+  - pdb.yaml
+  # secret.example.yaml は意図的に含めない。トークンは oc create secret で作る。
+
+images:
+  - name: search-mcp
+    newName: image-registry.openshift-image-registry.svc:5000/search-mcp/search-mcp
+    newTag: 1.0.0

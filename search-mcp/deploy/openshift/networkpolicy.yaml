@@ -1,0 +1,78 @@
+# 既定で全拒否し、必要な経路だけ開ける。
+# 「VM 上の opencode」は Route 経由（= Router Pod からの ingress）、
+# 「agent framework の Pod」はクラスタ内 Service 経由で入ってくるため、
+# 両方を許可する必要がある。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: search-mcp-default-deny
+  labels:
+    app.kubernetes.io/name: search-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: search-mcp
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: search-mcp-allow-router
+  labels:
+    app.kubernetes.io/name: search-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: search-mcp
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        # OpenShift Ingress Router から。Route 経由の外部アクセス（VM 上の opencode）用。
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: ingress
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: search-mcp-allow-agent-namespaces
+  labels:
+    app.kubernetes.io/name: search-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: search-mcp
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        # agent framework を動かす namespace に次のラベルを付けて許可する:
+        #   oc label namespace <agent-ns> mcp-client=search-mcp
+        - namespaceSelector:
+            matchLabels:
+              mcp-client: search-mcp
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: search-mcp-allow-monitoring
+  labels:
+    app.kubernetes.io/name: search-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: search-mcp
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
