@@ -1562,3 +1562,89 @@ Step 19〜20 で増えた検証がどこにも反映されていなかった。
 ### 次の判断
 
 コミットしてプッシュする。
+
+---
+
+## Step 22: 未検証項目に「どう検証するか」の手順を用意する
+
+### 目的
+
+❌ と書いてあるだけで、どう潰せばいいかが書かれていない項目を無くす。
+
+### 背景
+
+ユーザーから「検証できていないこともどうやればいいかの想定とかは
+書かれていますか？」と問われた。監査したところ、書けていなかった。
+
+### 事前仮説
+
+`deploy-openshift.md` に配備後の確認手順があるので、ある程度は書けているはず。
+
+### 実行内容
+
+**変更・操作**
+
+1. 全ドキュメントを対象に、未検証項目ごとの手順の有無を調べた。
+   `grep -rn "NetworkPolicy\|HPA\|PodDisruption" search-mcp/docs/*.md README.md`
+   に「確認」「検証」「dry-run」を重ねて検索した。
+2. `search-mcp/docs/deploy-openshift.md` の §5「確認する」を読んだ。
+3. `search-mcp/docs/clients.md` の §2（クラスタ内 Pod）を読んだ。
+4. NetworkPolicy の `policyTypes` を確認した
+   （`search-mcp/deploy/openshift/networkpolicy.yaml:15`）。
+5. `search-mcp/docs/verification-plan.md` を新規作成した（8 項目）。
+6. 各 README / `deploy-openshift.md` / `clients.md` からリンクを張った。
+7. `deploy-openshift.md` の適用手順に `oc apply --dry-run=server` を追加した。
+8. 全ドキュメントのリンク実在性を一括確認した。
+
+**観察した出力**
+
+- 監査結果: **NetworkPolicy / HPA / PDB の検証手順はどの文書にも存在しなかった**
+  （grep の結果 0 件）。
+- `deploy-openshift.md` §5 には Route 経由の curl があったが、
+  `oc apply --dry-run=server` は**配備手順に含まれていなかった**
+  （root README にだけ書いてあった）。
+- `clients.md` §2 には設定手順（`oc label`、Secret 配布）はあるが、
+  疎通を確認するコマンドが無かった。
+- `networkpolicy.yaml:15` は `policyTypes: ["Ingress"]`。
+  egress は制限していない。
+- リンク確認: 6 ファイルを対象に `MISS` 0 件。
+
+**参照した情報源**
+
+- `search-mcp/deploy/openshift/networkpolicy.yaml`（policyTypes、podSelector）
+- `search-mcp/deploy/openshift/hpa.yaml`（minReplicas 2 / maxReplicas 6 / CPU 70%）
+- `search-mcp/deploy/openshift/pdb.yaml`（minAvailable 1）
+
+### 期待結果
+
+未検証項目ごとに手順がある状態。
+
+### 実際の結果
+
+8 項目の手順を書いた。各項目に「コマンド」「成功の判定」
+「失敗したら何を疑うか」を付け、依存関係（1 → 2 → 3 の順）と所要時間も入れた。
+
+### 解釈
+
+**事実**: NetworkPolicy / HPA / PDB は、マニフェストを書いただけで
+検証方法を一切書いていなかった。❌ の理由（podman に概念が無い）は
+書いてあったが、クラスタがある人が何をすればいいかは無かった。
+
+**事実**: egress を制限していないのは意図した設計で、
+外部 API に出る必要があるため正しい。
+これを `verification-plan.md` §5 に明記した
+（外部 API が引けないとき NetworkPolicy を疑うのは誤りだと分かるように）。
+
+**推測**: NetworkPolicy の検証で一番間違えやすいのは
+「許可された経路が通ること」だけを見て終わることだと考え、
+拒否側（ラベルの無い namespace からタイムアウトすること）を先に書いた。
+ただしこれは実際に試した結果ではなく、設計からの推論である。
+
+**重要な但し書き**: `verification-plan.md` に書いた手順は
+**それ自体が未検証**である。クラスタが無いため、
+コマンドの typo や前提の漏れが残っている可能性がある。
+その旨を文書の冒頭に明記した。
+
+### 次の判断
+
+コミットしてプッシュする。

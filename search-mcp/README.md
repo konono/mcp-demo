@@ -42,6 +42,7 @@ virt 上の VM で動く opencode からも、クラスタ内の agent framework
 | [docs/clients.md](docs/clients.md) | VM 上の opencode / クラスタ内 Pod からの接続設定と切り分け表 |
 | [docs/security.md](docs/security.md) | 認証方式の選択理由、ローテーション手順、OAuth 2.1 への移行手順 |
 | [examples/README.md](examples/README.md) | **opencode から実際につないだ手順**と、どの設定が検証済みか |
+| [docs/verification-plan.md](docs/verification-plan.md) | **未検証項目の潰し方**。Route / NetworkPolicy / HPA / PDB などの手順と成功条件 |
 
 ## 構成
 
@@ -146,7 +147,8 @@ SCC 相当の制約つき）の 2 通りで、接続・ツール呼び出し・�
 Host 検証を curl で試すときの注意）は [docs/clients.md](docs/clients.md) §1.6〜1.8。
 
 未検証のまま残っているのは **Route 経由（TLS + 外部ホスト名）** と
-クラスタ内 Pod からの接続。
+クラスタ内 Pod からの接続。確かめる手順は
+[docs/verification-plan.md](docs/verification-plan.md) にまとめてある。
 
 ## コンテナで動かす
 

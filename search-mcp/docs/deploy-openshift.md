@@ -77,6 +77,18 @@ Route を公開した状態では戻すこと。
 
 ## 4. 適用する
 
+**先に server dry-run を通すこと。** このマニフェストはクラスタが無い環境で
+書かれており、API スキーマ検証を一度も受けていない。
+`podman kube play` は独自パーサなのでフィールド名の typo を見逃す。
+
+```bash
+oc apply --dry-run=server -k search-mcp/deploy/openshift/
+```
+
+12 リソースが `(server dry run)` 付きで列挙されれば通っている。
+`unknown field` や `no matches for kind` が出たら直してから進む。
+`--dry-run=client` では未知フィールドが素通りするので代用にならない。
+
 ```bash
 oc apply -k search-mcp/deploy/openshift/
 ```
@@ -123,6 +135,11 @@ MCP クライアントでの疎通確認は `examples/smoke_client.py` を使う
 cd search-mcp
 MCP_URL="https://$HOST/mcp" MCP_TOKEN="$TOKEN" uv run python examples/smoke_client.py
 ```
+
+ここまでは「配備できたか」の確認。
+**NetworkPolicy / HPA / PDB / opencode からの接続**は別途確かめる必要があり、
+手順は [verification-plan.md](verification-plan.md) にまとめてある
+（どれも実クラスタが無くて未検証のまま残っている項目）。
 
 ## 設計上の判断メモ
 

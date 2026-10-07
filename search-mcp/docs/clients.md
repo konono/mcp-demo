@@ -136,6 +136,7 @@ limit
 
 未確認: **Route 経由（TLS + 外部ホスト名 + OpenShift Router）**。
 上記はすべて平文 HTTP です。TLS 終端と Router のタイムアウトは試せていません。
+確かめる手順は [verification-plan.md](verification-plan.md) §2〜3 にあります。
 
 ### 1.6.1 Host 検証を curl で試すときの注意
 

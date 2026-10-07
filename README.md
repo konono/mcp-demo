@@ -69,6 +69,7 @@ SKILL.md の各記述が MCP のどこに落ちるのか、なぜ機械的な移
 | [clients.md](search-mcp/docs/clients.md) | VM 上の opencode / クラスタ内 Pod からの接続 |
 | [security.md](search-mcp/docs/security.md) | 認証の設計、トークンのローテーション、OAuth 2.1 への移行 |
 | [examples/README.md](search-mcp/examples/README.md) | **opencode から実際につないだ手順**と、動いた設定ファイル |
+| [verification-plan.md](search-mcp/docs/verification-plan.md) | **まだ検証できていない項目を、どう潰すか**。手順と成功条件 |
 | [search-mcp/README.md](search-mcp/README.md) | MCP サーバーの構成と環境変数 |
 
 ### 作業記録
@@ -201,16 +202,28 @@ opencode 1.18.34 + Qwen3.6 35B A3B から、2 通りの構成で接続した。
 
 ---
 
-E2E は DooD 環境でも動くよう、専用ネットワーク上のクライアントコンテナから
-curl する構成にしてある（publish したポートにはこのプロセスから到達できないため）。
-同じ理由で、opencode からの接続検証ではコンテナ IP を直接指定している。
+### ❌ をどう潰すか
 
-クラスタが無い環境で作ったため、マニフェストの**フィールド名の typo や
-apiVersion の誤りは検出できていない**。配備前に実クラスタで確認すること。
+上の ❌ はすべて、**手順を
+[verification-plan.md](search-mcp/docs/verification-plan.md) に書いてある。**
+項目ごとに「どう確かめるか」「何が返れば成功か」「失敗したら何を疑うか」を
+まとめた。所要時間と依存関係（どれを先にやるべきか）も付けた。
+
+クラスタがあるなら、まずこれだけ実行すること。1 分で終わる。
 
 ```bash
 oc apply --dry-run=server -k search-mcp/deploy/openshift/
 ```
+
+`podman kube play` は独自パーサなのでフィールド名の typo を見逃す。
+クラスタが無い環境で作ったため、マニフェストの**フィールド名の typo や
+apiVersion の誤りは検出できていない**。
+
+---
+
+E2E は DooD 環境でも動くよう、専用ネットワーク上のクライアントコンテナから
+curl する構成にしてある（publish したポートにはこのプロセスから到達できないため）。
+同じ理由で、opencode からの接続検証ではコンテナ IP を直接指定している。
 
 ## 要件
 
