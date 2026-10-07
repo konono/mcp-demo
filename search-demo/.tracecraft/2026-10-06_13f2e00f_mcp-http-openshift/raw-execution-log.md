@@ -1443,3 +1443,129 @@ $ cd /Users/kono/gitrepo/mcp-demo && git status --short
 
 検証用ワークスペース `~/opencode-trial/` はリポジトリ外のため、
 コミット対象には含まれない。
+
+---
+
+## Phase 18: thinking の無効化と Qwen 3.6 の移植能力測定
+
+すべて `POST https://maas-rhdp.apps.maas.redhatworkshops.io/v1/chat/completions`、
+model `qwen36-35b-a3b`、`Authorization: Bearer <REDACTED>`。
+
+### 18-1. content が None で返る事象の確認
+
+message オブジェクトをそのまま出力した結果:
+
+```json
+{"finish_reason": "stop",
+ "index": 0,
+ "message": {"content": "\n\n2",
+             "role": "assistant",
+             "reasoning_content": "Here's a thinking process:\n1. **Analyze User Input:** ..."}}
+```
+
+### 18-2. thinking 抑制方法の比較（prompt: 「1+1は？ 短く答えて。」max_tokens=400）
+
+```
+baseline                   reasoning= 1304ch content=    0ch total_tok= 400   15s
+chat_template_kwargs       reasoning=    0ch content=  182ch total_tok=  75    3s   <- WORKS
+reasoning_effort=none      reasoning= 1292ch content=    0ch total_tok= 400   13s
+reasoning_effort=low       reasoning= 1287ch content=    0ch total_tok= 400   20s
+extra_body thinking        reasoning= 1323ch content=    0ch total_tok= 400   17s
+/no_think suffix           reasoning= 1441ch content=    0ch total_tok= 400   14s
+```
+
+### 18-3. STEP 3（仕分け）の実行
+
+リクエスト: PROMPT.md 全文 + weather-forecast の SKILL.md + weather_demo.py +
+「STEP 3（仕分け表）だけを実行してください。表だけを出力し、前置きや後書きは書かないこと。」
+`max_tokens=2400`、`chat_template_kwargs: {"enable_thinking": false}`。
+
+```
+### STEP3  prompt=9026 completion=990 38s
+```
+
+出力（抜粋。全文は /tmp/step3.md）:
+
+```markdown
+### 仕分け表
+
+| # | SKILL.md の記述（原文を引用） | 分類 | 落とし先 | 備考 |
+|---|---|---|---|---|
+| 5 | `-d` / `--days` 3 取得する日数。1〜14 の範囲で指定する | SCHEMA | `Field(ge=1, le=14)` | 範囲制約をスキーマで強制 |
+| 6 | `-m` / `--metric` all `temperature` / ... のいずれか。繰り返し指定可。 | SCHEMA | `Annotated[list[str], Field(...)]` | 選択肢を `Literal` で固定 |
+| 8 | `-f` / `--format` json `json` または `text` | DROP | （捨てる） | MCP クライアントは JSON 形式で受け取るため、テキスト出力形式は不要 |
+| 13 | Open-Meteo は無料枠で 1 日あたり約 10,000 リクエストの制限がある。都市をむやみに増やさず、一度に 5 都市程度までにすること。 | SCHEMA + GUARD | `Field(le=5)` および `min(len(cities), 5)` | ネットワーク越しの誰でも呼べるため、スキーマで上限強制 + コードでもガード |
+| 15 | 地名が解決できなかった都市は、その都市だけ失敗して `errors` に入る。... | INSTRUCTIONS | `MCPServer(instructions=...)` | 部分失敗時の振る舞い（回答の作法） |
+| 17 | 回答するときは、どの都市のいつの予報かを必ず明示すること。 | INSTRUCTIONS | `MCPServer(instructions=...)` | 回答時の必須事項 |
+```
+
+全 17 行。「## 使い方」の `cd weather-demo` / `python3 weather_demo.py ...`
+コードブロックのみ表に含まれていなかった。
+
+### 18-4. STEP 4〜5（コード生成）の実行
+
+18-3 の出力を文脈に追加し、
+「STEP 4 と STEP 5 を実行し、weather_mcp/server.py の全文を出力してください。」
+`max_tokens=2400`。
+
+```
+### STEP4/5  prompt=... completion=2400 ...
+```
+
+生成は 200 行（/tmp/step5.py）。確認した要点:
+
+```python
+# 注意: このモジュールでは `from __future__ import annotations` を使わない。
+# ツール関数の Annotated[...] に settings の値を埋め込んでおり、
+# アノテーションが文字列化されると SDK 側の eval が解決できず InvalidSignature になるため。
+
+import logging
+from typing import Annotated, Literal
+
+import anyio
+from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
+```
+
+```python
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+```
+
+```python
+        # STEP 3 で GUARD に分類したものを、ここに書く
+        effective_cities = cities if cities else []
+        effective_cities = effective_cities[: settings.max_cities]
+
+        effective_days = settings.default_days if days is None else days
+        effective_days = max(1, min(effective_days, settings.max_days))
+```
+
+```python
+        payload = await anyio.to_thread.run_sync(
+            run_forecast, effective_cities, effective_days, effective_metrics, effective_lang
+        )
+        return WeatherResponse.model_validate(payload)
+```
+
+検出した欠陥:
+
+```python
+        lang: Annotated[
+            str,                     # <- 既定値が None なので str | None であるべき
+            Field(description=...),
+        ] = None,
+```
+
+- `cities` に `max_length=5` が無い（STEP 3 では `Field(le=5)` と書いていた）
+- `from weather_demo import run_forecast` が関数本体の中にある
+
+### 18-5. 背景で走っていた opencode プロセスの停止
+
+TaskStop で run 3（btseetr0k）と run 4（b85o29dk0）を停止した。
+どちらも成果物を生まないまま滞留していた。

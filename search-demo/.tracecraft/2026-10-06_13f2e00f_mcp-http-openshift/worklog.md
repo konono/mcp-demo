@@ -1209,3 +1209,85 @@ server.py 2191 / test_server.py 2349）。
 具体的には (a) 実行環境の要件と測定方法を冒頭に追加、
 (b) 途中経過を会話ではなくファイルに書くよう指示を追加。
 検証用トークンは削除済み。ワークスペースはリポジトリ外のため影響なし。
+
+---
+
+## Step 18: thinking を切って Qwen 3.6 の移植能力そのものを測る
+
+### 目的
+
+「PROMPT.md は 35B 級モデルに通用するか」を、実行基盤の制約と切り分けて測る。
+
+### 背景
+
+Step 17 で opencode 経由の移植を 4 回試み、全て失敗した。しかし失敗の形は
+いずれも実行基盤由来（接続切断、コンテキスト切り詰め、ツール JSON の truncate）で、
+モデルの仕分け判断や生成コードの質を一度も観測できていなかった。
+この状態で「qwen3.6 では無理だった」と報告するのは事実に反する。
+
+### 事前仮説
+
+60 秒 / 33 tok/s から計算される約 1900 トークンの出力枠は、
+1 ファイルの write には足りるはず。計算が合わないので別の要因がある。
+
+### 実行内容
+
+**変更・操作**
+
+1. opencode を経由せず `/v1/chat/completions` を urllib で直接呼ぶスクリプトを書いた。
+2. PROMPT.md + SKILL.md + weather_demo.py を 1 プロンプトに詰め、
+   STEP 3 のみを `max_tokens=1600` で依頼した。
+3. `content` が `None` で返ったため、message オブジェクト全体を出力した。
+4. `reasoning_content` を発見。thinking を止める方法を 5 通り試した。
+5. 効いた `chat_template_kwargs: {"enable_thinking": false}` を付けて
+   STEP 3 を再実行、続けて STEP 4〜5 を実行した。
+6. 背景で走らせていた opencode の run 3 / run 4 を TaskStop で停止した。
+
+**観察した出力**
+
+- 最初の STEP 3: `completion_tokens=1600` を消費、57 秒、`content` は `None`。
+  `reasoning_content` にのみ生成があった。
+- 「1+1は？」のベンチ: 既定で reasoning 1304 字 / content 0 字 / 400 tok / 15 秒。
+  `chat_template_kwargs` で reasoning 0 字 / content 182 字 / 75 tok / 3 秒。
+  `reasoning_effort` / `thinking` / `/no_think` はいずれも無効。
+- thinking を切った STEP 3: prompt 9026 / completion 990 / 38 秒。17 行の仕分け表。
+- thinking を切った STEP 4〜5: completion 2400（上限到達）、200 行の server.py。
+
+**参照した情報源**
+
+- `/home/agent/opencode-trial/weather-demo/.opencode/skill/weather-forecast/SKILL.md`
+  （罠を 4 つ仕込んだ検証用 Skill）
+- 生成物 `/tmp/step3.md`、`/tmp/step5.py`
+
+### 期待結果
+
+thinking を切れば 60 秒の枠内に可視出力が収まり、
+モデルの移植能力を初めて観測できる。
+
+### 実際の結果
+
+収まった。STEP 3 は 38 秒で完走。仕分け表は仕込んだ罠 4 つのうち 3 つを正解し、
+特に最難関の「一度に 5 都市程度まで」を SCHEMA + GUARD の両方に落とした。
+落としたのは「## 使い方」のコードブロックを DROP として表に載せること 1 件のみ。
+STEP 5 のコードは SDK の落とし穴 5 項目をすべて回避していた。
+残った欠陥は型注釈 1 箇所と、スキーマ側の `max_length` 欠落、
+関数内 import の 3 つで、いずれも軽微。
+
+### 解釈
+
+**事実**: 失敗の支配的な原因は不可視の思考トークンだった。
+`reasoning_content` は出力枠と応答時間を消費するが画面には出ない。
+60 秒の壁は実在するが、その枠を先に使い切っていたのは thinking である。
+
+**事実**: Step 17 の worklog と Finding に書いた「60 秒の壁が原因」という
+説明は不完全だった。訂正を Finding として追記した（既存エントリは変更しない）。
+
+**推測**: opencode の 17 回連続した `JSON parsing failed` も、
+同じ機序（思考で枠を使い切り、ツール呼び出しの JSON が途中で切れる）と考える。
+ただし opencode が `reasoning_content` をどう扱うかは確認していないため断定しない。
+
+### 次の判断
+
+PROMPT.md の「実行環境の要件」に推論モデルの節を追加し、
+STEP 3 に「使い方のコードブロックを落としがち」という注意を追記した。
+コミットしてユーザーに報告する。

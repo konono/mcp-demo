@@ -585,3 +585,143 @@ opencode を非対話モード（`opencode run --auto`）で実行した。
   「This is a fresh session — I don't have prior conversation history」と応答した。
   コンテキスト切り詰めで `PROMPT.md` ごと失われたと推測するが、
   opencode の内部動作は確認していないため断定しない。
+
+---
+
+## Finding: qwen36-35b-a3b は推論モデルで、thinking が出力枠と時間を食い潰していた
+
+### 調べた理由
+
+opencode 経由の移植が 4 回とも失敗した。失敗の形は「ツール呼び出しの JSON が
+途中で切れる」「モデルがタスク自体を見失う」で、どちらも出力枠の不足を示唆していた。
+しかし 60 秒 / 33 tok/s から計算した約 1900 トークンの枠は、
+1 ファイル分の write には足りるはずだった。計算が合わないので原因を調べた。
+
+### 調査方法
+
+opencode を経由せず、ゲートウェイの `/v1/chat/completions` を
+urllib で直接叩いた。まず STEP 3 の実行を `max_tokens=1600` で依頼したところ、
+`completion_tokens=1600` を消費したのに `content` が `None` で返った
+（スクリプトが `TypeError: write() argument must be str, not None` で落ちた）。
+レスポンスの message オブジェクトをそのまま出力して中身を確認した。
+
+### わかった事実
+
+1. message には `content` の他に `reasoning_content` フィールドがあり、
+   生成はすべてそちらに入っていた。`qwen36-35b-a3b` は推論モデルである。
+
+2. 思考は短い質問でも発生する。「1+1は？ 短く答えて。」で
+   `reasoning_content` が 1304 字、`content` が 0 字（`max_tokens=400` で打ち切り）。
+
+3. thinking を止める方法を 5 通り試し、効いたのは 1 つだけだった。
+
+   | 設定 | reasoning | content | tokens | 時間 |
+   |---|---|---|---|---|
+   | 既定 | 1304 字 | 0 字 | 400 | 15 秒 |
+   | `chat_template_kwargs: {"enable_thinking": false}` | **0 字** | **182 字** | **75** | **3 秒** |
+   | `reasoning_effort: "none"` | 1292 字 | 0 字 | 400 | 13 秒 |
+   | `reasoning_effort: "low"` | 1287 字 | 0 字 | 400 | 20 秒 |
+   | `extra_body` の `thinking: {"type":"disabled"}` | 1323 字 | 0 字 | 400 | 17 秒 |
+   | プロンプト末尾に `/no_think` | 1441 字 | 0 字 | 400 | 14 秒 |
+
+4. `chat_template_kwargs` を付けると、同じタスクが 400 トークン / 15 秒から
+   75 トークン / 3 秒になった。
+
+### 根拠
+
+すべて `https://maas-rhdp.apps.maas.redhatworkshops.io/v1/chat/completions`
+（model: `qwen36-35b-a3b`、token は `<REDACTED>`）への実リクエストの結果。
+raw-execution-log.md Phase 18 に全出力を記録した。
+
+### 作業への影響
+
+Finding「MaaS ゲートウェイに 60 秒の応答時間上限」で記録した
+「60 秒の壁が原因」という説明は**不完全だった**。60 秒の壁は実在するが、
+その枠を先に食い潰していたのは不可視の思考トークンである。
+thinking を切れば同じ枠で 5 倍以上の可視出力が出る。
+
+PROMPT.md の「実行環境の要件」に推論モデル向けの節を追加した。
+
+### 未確認事項
+
+- opencode の provider 設定から `chat_template_kwargs` を渡せるかどうか。
+  opencode の設定スキーマを確認していない。
+- 60 秒の上限がどの層（Route の haproxy timeout / LiteLLM / vLLM）のものか。
+
+---
+
+## Finding: thinking を切れば 35B モデルは STEP 3〜5 を実用品質で実行できた
+
+### 調べた理由
+
+「PROMPT.md が 35B 級モデルに通用するか」が検証の目的だったが、
+ここまでの失敗はすべて実行基盤由来で、モデルの移植能力そのものを
+一度も測れていなかった。「モデルには無理だった」と結論するのは誤りになる。
+
+### 調査方法
+
+`chat_template_kwargs: {"enable_thinking": false}` を付け、
+opencode を経由せず API を直接呼んだ。PROMPT.md 全文 + 移植対象の
+SKILL.md + weather_demo.py を 1 プロンプトに詰め（prompt 9026 トークン）、
+STEP 3 のみを依頼。続けてその出力を文脈に足して STEP 4〜5 を依頼した。
+
+検証用の SKILL.md には、PROMPT.md が「間違えやすい」と名指ししている罠を
+意図的に 4 つ仕込んである。
+
+### わかった事実
+
+**STEP 3（仕分け）**: completion 990 トークン / 38 秒。17 行の仕分け表を生成。
+
+| 仕込んだ罠 | 期待 | 結果 |
+|---|---|---|
+| `-m` は 4 択 | SCHEMA / `Literal` | ✅ 「選択肢を `Literal` で固定」 |
+| `-d` は 1〜14 | SCHEMA / `ge=1, le=14` | ✅ |
+| 「一度に 5 都市程度まで」 | **SCHEMA + GUARD** | ✅ `Field(le=5)` と `min(len(cities), 5)` の両方を指定 |
+| 「`cd` / `python3 weather_demo.py`」 | DROP として表に載せる | ❌ 表から欠落 |
+
+3 つ正解、1 つ欠落。特に 3 つ目（散文の注意書きをスキーマに格上げし、
+さらにコードでも押さえる）は PROMPT.md が「ここを特に注意」として
+書いた最難関の判断で、備考に「ネットワーク越しの誰でも呼べるため」と
+理由まで書いていた。指示書の意図が伝わっている。
+
+なお `-f/--format` を DROP に分類し、理由を
+「MCP クライアントは JSON 形式で受け取るため」と書いた。これは正解で、
+かつ PROMPT.md の DROP 例に無い項目を自力で判断している。
+
+**STEP 4〜5（コード生成）**: completion 2400 トークン上限 / 200 行を生成。
+SDK の落とし穴 5 項目はすべて守られていた。
+
+- `from mcp.server.mcpserver import MCPServer`（`FastMCP` ではない）
+- `from __future__ import annotations` 無し。不要である理由のコメントまで転記
+- snake_case（`read_only_hint`）
+- `anyio.to_thread.run_sync()` で同期処理を包んだ
+- Pydantic 全フィールドに `Field(description=...)`
+- `ToolAnnotations` 4 項目が読み取り専用ツールとして正しい
+- GUARD を関数本体に実装（`effective_cities[: settings.max_cities]`）
+
+残った欠陥は 3 つ、いずれも軽微:
+
+1. `lang: Annotated[str, ...] = None` — 既定値 `None` に対し型が `str`。
+   `str | None` であるべき
+2. `cities` のスキーマに `max_length=5` が無い。STEP 3 では
+   `Field(le=5)` と書いたのに、コードではコード側の切り詰めだけになった
+3. `from weather_demo import run_forecast` を関数本体の中で import している
+
+### 根拠
+
+生成物は `/tmp/step3.md` と `/tmp/step5.py`。
+raw-execution-log.md Phase 18 に実行コマンドと全出力を記録した。
+
+### 作業への影響
+
+PROMPT.md の STEP 3 に「## 使い方 のコードブロックを表から落としがち」
+という注意を追記した（唯一の欠落に対応）。
+
+「PROMPT.md は 35B 級に通用するか」への答えは **通用する**。
+ただし条件付きで、推論モデルなら thinking を切ることが前提になる。
+
+### 未確認事項
+
+- STEP 6〜9（周辺ファイル・テスト・コンテナ・ドキュメント）は実行していない。
+- 生成された `server.py` を実際に起動・テストしていない。構文も検証していない。
+- 1 回の試行の結果であり、再現性は未確認。

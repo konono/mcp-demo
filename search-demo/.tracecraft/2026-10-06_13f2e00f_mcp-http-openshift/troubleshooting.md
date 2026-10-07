@@ -552,3 +552,76 @@ context を 60000 にした試行では、タスクを見失う現象は再現�
 ### 再発防止
 PROMPT.md の「作業の全体像」直後に「途中経過はファイルに書いてください」節を追加した。
 理由（会話は切り詰められるが、ファイルは残る）も併記した。
+
+---
+
+## Issue: completion_tokens を消費しているのに content が None で返る
+
+### 症状
+
+ゲートウェイに STEP 3 の実行を依頼したところ、`usage.completion_tokens` が
+`max_tokens` に指定した 1600 に達し 57 秒かかったにもかかわらず、
+`choices[0].message.content` が `None` だった。
+これを `write()` に渡したスクリプトが
+`TypeError: write() argument must be str, not None` で落ちた。
+
+### 影響
+
+生成が成功しているのか失敗しているのかが判別できない。
+opencode 経由の 4 回の失敗も、同じ事象を別の形で見ていた可能性がある。
+
+### 原因候補
+
+1. ゲートウェイが本文を別フィールドに入れている
+2. `finish_reason` が `length` で本文が捨てられている
+3. モデルが空応答を返した
+
+### 切り分け
+
+`message` オブジェクトを `json.dumps` でそのまま出力した。結果:
+
+```json
+{"finish_reason": "stop",
+ "message": {"content": "\n\n2", "role": "assistant",
+             "reasoning_content": "Here's a thinking process:\n1. **Analyze User Input:** ..."}}
+```
+
+`finish_reason` は `length` ではなく `stop`。本文は `reasoning_content` にあった。
+候補 1 が正しい。
+
+確認のため「1+1は？ 短く答えて。」という最小の質問を投げたところ、
+それでも `reasoning_content` が 1304 字生成された。
+つまりタスクの難易度とは無関係に、毎ターン思考が走る。
+
+### 実際の原因
+
+`qwen36-35b-a3b` は推論モデルであり、既定で thinking が有効。
+思考は `reasoning_content` に入り、`content` とは別枠だが
+**`max_tokens` と応答時間は共有する**。
+STEP 3 では 1600 トークンの枠を思考が使い切り、本文が出る前に打ち切られた。
+
+### 解決策
+
+リクエストボディに次を追加する。
+
+```json
+{ "chat_template_kwargs": { "enable_thinking": false } }
+```
+
+他に `reasoning_effort: "none"` / `"low"`、
+`thinking: {"type": "disabled"}`、プロンプト末尾の `/no_think` を試したが、
+**いずれも無視された**（thinking が 1287〜1441 字生成され続けた）。
+効いたのは `chat_template_kwargs` のみ。
+
+### 解決確認
+
+同じ STEP 3 のリクエストが、thinking 有効時は 1600 トークン / 57 秒で
+本文 0 字だったのに対し、無効化後は 990 トークン / 38 秒で
+17 行の仕分け表が返った。60 秒の壁の内側に収まった。
+
+### 再発防止
+
+PROMPT.md の「実行環境の要件」に推論モデルの節を追加し、
+5 通りの比較表と効く設定を明記した。
+推論モデルを使う場合、この設定が無いと失敗は
+「モデルの能力不足」に見えるが、実際は設定の問題である。
