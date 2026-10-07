@@ -1140,3 +1140,52 @@ TOTAL                          147      9    94%
   カバレッジ行を追加、構成ツリーに `search-demo/tests/` を追記
 - `search-mcp/README.md`: テスト節に単体テストの内訳表を追加
 - `search-demo/README.md`: テスト節を新設、構成に `tests/` を追記
+
+---
+
+## Phase 16: PROMPT.md の作成
+
+### 参照先の裏取り（記載前に実ファイルを確認）
+
+```console
+$ grep -n "^#\{1,3\} " search-mcp/docs/skill-to-mcp.md
+1:# Skill を MCP に落とす — `public-api-search` を例に
+23:## 0. 移植判定 — まずこれを通す
+52:## 1. 根本的な違い: 散文 vs スキーマ
+80:## 2. 対応表（実際の移植結果）
+243:### 2.7 失敗の返し方 — `errors` フィールドか `is_error` か
+301:## 4. 移植するときのチェックリスト
+327:### 4.1 description の長さの目安
+344:### 4.2 移植できたことの検証
+411:## 6. ローカルのファイル・状態に依存する Skill（§0-1）
+469:## 7. 副作用のある Skill（§0-2）
+537:## 8. 添付ファイルを持つ Skill（§0-3）
+597:## 9. まとめ: どこまでが本例の射程か
+```
+
+```console
+$ grep -n "def create_app" search-mcp/src/search_mcp/app.py && ls search-demo/.opencode/skill/public-api-search/ && ls Containerfile && grep -n "emptyDir\|runAsUser\|tmp" search-mcp/deploy/openshift/deployment.yaml
+23:def create_app(settings: Settings | None = None) -> ASGIApp:
+SKILL.md
+Containerfile
+34:        # restricted-v2 SCC が UID を割り当てるので runAsUser は書かない。
+61:            # readOnlyRootFilesystem のため、書き込みが要る場所だけ emptyDir を当てる。
+62:            - name: tmp
+63:              mountPath: /tmp
+94:        - name: tmp
+95:          emptyDir: {}
+```
+
+`search-mcp/src/search_mcp/server.py` を全 201 行 Read し、
+テンプレートの骨格と行番号参照（156-163 のスキーマ、169-170 のガード）を確定した。
+
+### 作成・更新したファイル
+
+- `PROMPT.md`（新規・約 480 行）
+- `README.md`（ルート）: 「生成 AI に移植させる」節、ドキュメント表、構成ツリーに追記
+- `search-mcp/README.md`: ドキュメント表に追記
+
+### 未実施
+
+30B 級モデルに実際に PROMPT.md を渡して移植させる検証は行っていない
+（該当モデルの実行環境が手元に無いため）。

@@ -34,6 +34,17 @@ SKILL.md の各記述が MCP のどこに落ちるのか、なぜ機械的な移
 他の型の Skill（ローカルファイルに依存する / 副作用がある / 添付ファイルを持つ）を
 移植する場合の判断材料も §0 と §6〜§8 に含めた。
 
+### 生成 AI に移植させる
+
+この知識をエージェントに実行させるための作業指示書が
+**[`PROMPT.md`](PROMPT.md)** にある。リポジトリごと渡して、こう指示する。
+
+> `PROMPT.md` を読んで、その指示に従って `<Skill のパス>` を MCP サーバーに移植してください。
+
+9 つの STEP、判断を要する箇所はすべて分岐表、コピーして使うテンプレート、
+最後に完成チェックリスト、という構成にしてある。
+30B 前後のモデルでも齟齬が出ないよう、判断を仰ぐのではなく表を引かせる形で書いた。
+
 ---
 
 ## ドキュメント
@@ -41,6 +52,7 @@ SKILL.md の各記述が MCP のどこに落ちるのか、なぜ機械的な移
 | | |
 |---|---|
 | [skill-to-mcp.md](search-mcp/docs/skill-to-mcp.md) | **Skill → MCP の移植知識**（このリポジトリの主眼） |
+| [PROMPT.md](PROMPT.md) | **生成 AI に移植作業をさせるための作業指示書**。そのままエージェントに渡す |
 | [deploy-openshift.md](search-mcp/docs/deploy-openshift.md) | ビルドと OpenShift への配備 |
 | [clients.md](search-mcp/docs/clients.md) | VM 上の opencode / クラスタ内 Pod からの接続 |
 | [security.md](search-mcp/docs/security.md) | 認証の設計、トークンのローテーション、OAuth 2.1 への移行 |
@@ -84,6 +96,7 @@ python3 search-demo/search_demo.py "rust tui" -s github -n 3
 
 ```
 mcp-demo/
+├── PROMPT.md                  生成 AI に移植作業をさせるための指示書
 ├── Containerfile              UBI9 マルチステージ（build context はリポジトリルート）
 ├── search-demo/               Skill 版。標準ライブラリのみ
 │   ├── search_demo.py

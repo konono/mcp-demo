@@ -37,6 +37,7 @@ virt 上の VM で動く opencode からも、クラスタ内の agent framework
 | 文書 | 内容 |
 |---|---|
 | [docs/skill-to-mcp.md](docs/skill-to-mcp.md) | **SKILL.md をどう MCP のツール定義に落としたか。**何を description に残し、何をスキーマで強制し、何を捨てたか |
+| [../PROMPT.md](../PROMPT.md) | 上の知識を生成 AI に実行させるための作業指示書 |
 | [docs/deploy-openshift.md](docs/deploy-openshift.md) | ビルドから配備、設計判断（stateless にした理由など） |
 | [docs/clients.md](docs/clients.md) | VM 上の opencode / クラスタ内 Pod からの接続設定と切り分け表 |
 | [docs/security.md](docs/security.md) | 認証方式の選択理由、ローテーション手順、OAuth 2.1 への移行手順 |
