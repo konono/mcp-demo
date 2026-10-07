@@ -1189,3 +1189,257 @@ Containerfile
 
 30B 級モデルに実際に PROMPT.md を渡して移植させる検証は行っていない
 （該当モデルの実行環境が手元に無いため）。
+
+---
+
+## Phase 17: PROMPT.md の実機検証
+
+認証トークンは環境変数 `$T` 経由で渡した。値はすべて `<REDACTED>`。
+
+### ゲートウェイの疎通とモデル確認
+
+```console
+$ curl -s -m 20 -o /dev/null -w "%{http_code}\n" https://maas-rhdp.apps.maas.redhatworkshops.io/v1/models
+401
+
+$ curl -s https://maas-rhdp.apps.maas.redhatworkshops.io/v1/models -H "Authorization: Bearer <REDACTED>"
+{"data":[{"id":"qwen36-35b-a3b","object":"model","created":1677610602,"owned_by":"openai"}],"object":"list"}
+```
+
+### 参照ファイルのトークン数測定（usage.prompt_tokens で実測）
+
+```console
+PROMPT.md                                               7055 tokens
+search-mcp/docs/skill-to-mcp.md                         7349 tokens
+search-demo/.opencode/skill/public-api-search/SKILL.md   714 tokens
+search-mcp/src/search_mcp/server.py                     2191 tokens
+search-mcp/tests/test_server.py                         2349 tokens
+                                                 合計 19,658 tokens
+```
+
+### opencode のインストール
+
+```console
+$ mise use -g opencode@latest
+mise ✓ opencode@1.18.34  14.0s  opencode-linux-arm64.tar.gz
+
+$ mise use -g python@3.12 uv@latest
+mise ~/.config/mise/config.toml tools: python@3.12.15, uv@0.12.23
+```
+
+（検証用ワークスペースがリポジトリ外にあり、mise の shim が
+プロジェクト外で python3 を解決できなかったためグローバル設定が必要だった）
+
+### 検証対象スクリプトの動作確認
+
+```console
+$ python3 weather-demo/weather_demo.py 東京 -d 2 -m temperature -f text
+! 東京: city not found: 東京
+
+$ python3 weather-demo/weather_demo.py Tokyo Osaka -d 2 -f text
+# Tokyo (日本)
+  date=2026-10-07  temperature=25.0  precipitation=0.0  wind=9.3
+  date=2026-10-08  temperature=24.0  precipitation=0.0  wind=5.1
+# Osaka (日本)
+  date=2026-10-07  temperature=24.2  precipitation=0.0  wind=11.2
+  date=2026-10-08  temperature=26.2  precipitation=0.0  wind=7.9
+```
+
+（日本語地名が解決できないのは Open-Meteo のジオコーディングの挙動。
+部分失敗の経路を含む検証対象としてはむしろ好都合だったのでそのまま使用）
+
+### 試行 1: ユーザー提供の設定のまま（context 32000 / output 8000）
+
+```console
+$ opencode run --auto --dir ~/opencode-trial "PROMPT.md を読んで、その指示に従って weather-demo/.opencode/skill/weather-forecast/SKILL.md を MCP サーバーに移植してください。成果物は weather-mcp/ に作ってください。"
+
+> build · qwen36-35b-a3b
+→ Read PROMPT.md
+→ Read weather-demo/.opencode/skill/weather-forecast/SKILL.md
+✱ Glob "weather-mcp/**/*"  0 matches
+• Read search-mcp reference files  Explore Agent
+→ Read weather-demo/weather_demo.py
+✓ Read search-mcp reference files  Explore Agent
+→ Read search-mcp/docs/skill-to-mcp.md
+→ Read search-mcp/src/search_mcp/server.py
+→ Read search-mcp/src/search_mcp/settings.py
+→ Read search-mcp/src/search_mcp/auth.py
+→ Read search-mcp/src/search_mcp/app.py
+→ Read search-mcp/src/search_mcp/__main__.py
+→ Read search-mcp/tests/test_server.py
+→ Read search-mcp/pyproject.toml
+
+# Todos
+[•] STEP 1: 棚卸し表を作成
+[ ] STEP 2: 移植可能か判定
+[ ] STEP 3: 1文ずつ仕分け
+[ ] STEP 4: 出力スキーマ(Pydantic)を決める
+[ ] STEP 5: server.py を書く
+[ ] STEP 6: 周辺ファイル(settings/auth/app/__main__)を書く
+[ ] STEP 7: pyproject.toml を書く
+[ ] STEP 8: tests/test_server.py を書く
+[ ] STEP 9: Containerfile を書く
+[ ] STEP 10: README.md と docs/skill-to-mcp.md を書く
+[ ] 完成チェックリストを確認・テスト実行
+
+Now I have a complete understanding of both the instructions and the reference implementation. Let me proceed step by step.
+Error: Cannot connect to API: The socket connection was closed unexpectedly.
+```
+
+生成ファイル: なし。
+
+### 切断原因の切り分け
+
+まず入力長が原因かを確認した。
+
+```console
+~14k: OK prompt_tokens=14408 (2s)
+~29k: OK prompt_tokens=28794 (3s)
+~43k: OK prompt_tokens=43180 (5s)
+```
+
+入力は 43k でも通る。次に出力長とストリーミングの有無を変えた。
+
+```console
+stream=False max_tokens=600:  OK 6094B in 19s
+stream=False max_tokens=6000: RemoteDisconnected after 60s
+stream=True  max_tokens=600:  OK 261B in 18s
+stream=True  max_tokens=6000: RemoteDisconnected after 60s
+```
+
+ストリーミングでも 60 秒で切断される。受信チャンク数は 0 だった
+（ゲートウェイが応答全体をバッファしている）。
+
+実際のコンテキスト上限:
+
+```console
+mult=6:  HTTP 400 {"error":{"message":"litellm.ContextWindowExceededError: ...
+  This model's maximum context length is 65536 tokens. However, you requested
+  16 output tokens and your prompt contains at least 65521 input tokens ...
+```
+
+→ 実機は 65536。ユーザー提供の設定（32000）は半分の申告。
+
+出力スループットの測定:
+
+```console
+max_tokens=  400: OK completion=  400  11.9s   33.7 tok/s
+max_tokens=  800: OK completion=  800  29.5s   27.1 tok/s
+max_tokens= 1200: OK completion= 1200  37.2s   32.3 tok/s
+max_tokens= 1600: OK completion= 1600  47.6s   33.6 tok/s
+max_tokens= 2000: RemoteDisconnected after 59s
+```
+
+→ 約 33 tok/s。60 秒の壁により 1 応答の出力上限は実質 1900 トークン前後。
+
+### 試行 2: output を 1500 に下げる（context 32000 のまま）
+
+```console
+...
+Now I have all the reference files read. Let me work through the steps systematically.
+
+**STEP 1: 棚卸し**
+Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.
+
+$ ls -la /home/agent/opencode-trial/weather-demo/
+...
+I need more context about what we were working on. Let me check the project state:
+→ Read weather-demo/.opencode/skill/weather-forecast/SKILL.md
+This is a fresh session — I don't have prior conversation history. Based on the
+workspace contents, there's an existing weather forecast project:
+...
+If you'd like to continue work on this or something else, let me know what to do next.
+```
+
+STEP 1 の途中で出力が切れ、その後タスクを見失った。生成ファイル: なし。
+
+### 試行 3: context 60000 / output 1200
+
+opencode が `init` までログを出した後、15 分間なにも起きず。
+
+```console
+timestamp=2026-10-07T04:21:37.510Z level=INFO run=58c38a45 message=init
+（以降ログなし）
+```
+
+原因未特定。stdin を閉じていなかった可能性があるため試行 4 で `< /dev/null` を追加。
+プロセスを kill して次へ。
+
+### 試行 4: context 60000 / output 1200、stdin を /dev/null に
+
+```console
+$ opencode run --auto "PROMPT.md を読んで、... 1 回の応答は 1000 トークン以内に ...
+  各 STEP の結果は会話に書かず weather-mcp/docs/porting-notes.md に追記してください。" < /dev/null
+
+Now I'll write all the files. Starting with the porting notes and core files.
+✗ Invalid Tool
+The arguments provided to the tool are invalid: Invalid input for tool write:
+JSON parsing failed: Text: {.
+Error message: JSON Parse error: Expected '}'
+（同様のエラーが続く）
+← Write weather-mcp/docs/porting-notes.md
+Wrote file successfully.
+...
+✗ Invalid Tool
+The arguments provided to the tool are invalid: Invalid input for tool write:
+JSON parsing failed: Text: {"filePath": "/home/agent/opencode-trial/weather-mcp/src/weather_mcp/server.py".
+Error message: JSON Parse error: Expected '}'
+...
+$ mkdir -p .../src/weather_mcp .../tests .../docs
+$ cat > .../src/weather_mcp/__init__.py << 'PYEOF'
+PYEOF
+```
+
+`Invalid Tool` が計 17 回。出力上限 1200 トークンではツール呼び出しの
+JSON が生成途中で打ち切られ、ファイルを書けていない。
+
+生成ファイル:
+```
+/home/agent/opencode-trial/weather-mcp/docs/porting-notes.md
+/home/agent/opencode-trial/weather-mcp/src/weather_mcp/__init__.py
+```
+
+### 生成された porting-notes.md（全文）
+
+```markdown
+# Porting Notes
+
+## STEP 1: 棚卸し
+
+| 項目 | 内容 |
+|---|---|
+| Skill 名 | weather-forecast |
+| frontmatter の description | 複数都市の天気予報を Open-Meteo の公開 API からまとめて取得する。... |
+| 実行しているコマンド/スクリプト | weather-demo/weather_demo.py |
+| 入力（引数・オプション） | cities（位置引数、複数指定可、日本語可）、-d/--days（1-14、既定3）、
+  -m/--metric（temperature/precipitation/wind/all、既定all）、--lang（ja、既定ja）、
+  -f/--format（json/text、既定json） |
+| 出力の形 | JSON: { count, results: [{city, country, days:[{date, temperature?,
+  precipitation?, wind?}]}], errors: [{city, error}] } |
+| 外部ネットワークに出るか | はい（Open-Meteo API） |
+| ローカルファイルを読むか | いいえ |
+| ローカルファイルを書くか | いいえ |
+| 同じ入力で何度呼んでも安全か | はい（読み取り専用） |
+| 添付ファイル（references/assets）があるか | いいえ |
+
+## STEP 2: 移植判定
+
+- 当てはまった行: #5
+- 理由: 外部 API を読むだけ（Open-Meteo 天気予報）。ローカルファイルの読書きなし、
+  副作用なし、添付ファイルなし
+- 追加で読んだ節: なし
+- 続行: そのまま続行
+```
+
+棚卸し表は指定フォーマットどおりで、内容も正確。
+
+### 後片付け
+
+```console
+$ rm -f ~/opencode-trial/.vllm-token
+$ cd /Users/kono/gitrepo/mcp-demo && git status --short
+（出力なし＝リポジトリは汚れていない）
+```
+
+検証用ワークスペース `~/opencode-trial/` はリポジトリ外のため、
+コミット対象には含まれない。

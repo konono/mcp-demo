@@ -373,3 +373,182 @@ unable to recognize "/tmp/rendered.yaml": ...
 ### 再発防止
 配備前に実クラスタで `oc apply --dry-run=server -k search-mcp/deploy/openshift/` を必ず実行する。
 この制約は README / deploy ドキュメントではなく、この記録と最終報告で明示した。
+
+---
+
+## Issue: opencode が「The socket connection was closed unexpectedly」で落ちる
+
+### 症状
+`opencode run` で Qwen 3.6 35B A3B（LiteLLM MaaS Gateway 経由）に
+移植作業をさせると、参照ファイルを読み終えた直後に落ちる。
+
+```
+Now I have a complete understanding of both the instructions and the reference implementation.
+Error: Cannot connect to API: The socket connection was closed unexpectedly.
+For more information, pass `verbose: true` in the second argument to fetch()
+```
+
+### 影響
+移植作業が 1 ステップも進まない。生成ファイルはゼロ。
+エラーメッセージがネットワーク層のものなので、原因の見当が付かない。
+
+### 原因候補
+1. コンテキスト長の超過（設定では 32000、参照ファイルだけで約 20k 消費）
+2. 入力が長すぎてゲートウェイが拒否している
+3. ゲートウェイ／Route の応答時間上限
+4. ネットワークの一時的な不調
+5. opencode 側のバグ
+
+### 切り分け
+ゲートウェイに直接リクエストを送り、変数を 1 つずつ変えた。
+
+**(a) 入力長を変える** — 候補 2 の検証。
+
+```
+~14k tokens: OK (2s)
+~29k tokens: OK (3s)
+~43k tokens: OK (5s)
+```
+
+43k でも通る。入力長は原因ではない。候補 2 を除外。
+
+**(b) コンテキスト上限を調べる** — 候補 1 の検証。
+
+```
+HTTP 400 litellm.ContextWindowExceededError:
+  This model's maximum context length is 65536 tokens.
+```
+
+実機の上限は 65536 で、設定の 32000 は過小申告だった。
+ただし切断時のエラーは 400 ではなく接続断なので、
+これは別の問題（後述）であり、切断の直接原因ではない。候補 1 を除外。
+
+**(c) 出力長とストリーミングを変える** — 候補 3 の検証。
+
+```
+stream=False max_tokens=600:  OK 6094B in 19s
+stream=False max_tokens=6000: RemoteDisconnected after 60s
+stream=True  max_tokens=600:  OK  261B in 18s
+stream=True  max_tokens=6000: RemoteDisconnected after 60s
+```
+
+**きっかり 60 秒で切断される。** stream の有無に関係しない。
+再現性も 100%。候補 4（一時的な不調）と候補 5（opencode のバグ）を除外。
+
+**(d) 限界値を測る**
+
+```
+max_tokens=400:  400 tok in 11.9s (33.7 tok/s)
+max_tokens=800:  800 tok in 29.5s (27.1 tok/s)
+max_tokens=1200: 1200 tok in 37.2s (32.3 tok/s)
+max_tokens=1600: 1600 tok in 47.6s (33.6 tok/s)
+max_tokens=2000: 切断 (59s)
+```
+
+### 実際の原因
+**ゲートウェイ（または前段の Route／プロキシ）に 60 秒の応答時間上限がある。**
+
+生成速度が約 33 tok/s なので、1 応答で出せるのは実質 1900 トークン前後。
+opencode の既定では `limit.output` が 8000 に設定されており、
+モデルが長い応答を始めると必ず 60 秒を超えて切断される。
+
+`stream=true` でも回避できないのは、ゲートウェイが SSE を
+そのまま流さずバッファしているため（切断までの受信チャンク数が 0 だった）。
+
+### 解決策
+根本解決はゲートウェイ側の設定変更（上限の延長）。これは管理者の領域。
+
+クライアント側の緩和策:
+
+1. `limit.output` を 1200〜1600 に下げる
+2. `limit.context` を実機に合わせて 60000 前後にする（32000 は過小申告）
+3. エージェントに「1 ファイルを 1 回で書かず、分割して追記する」と指示する
+
+### 解決確認
+緩和策を適用した試行で、STEP 0〜2 までは完走し、
+`weather-mcp/docs/porting-notes.md` が正しい内容で生成された。
+
+ただし**完全な解決にはならなかった。** 出力を 1200 に絞ると、
+今度はツール呼び出しの JSON が生成途中で打ち切られる。
+
+```
+✗ Invalid Tool
+The arguments provided to the tool are invalid: Invalid input for tool write:
+JSON parsing failed: Text: {"filePath": ".../src/weather_mcp/server.py".
+Error message: JSON Parse error: Expected '}'
+```
+
+計 17 回発生し、`server.py` を書けずに終わった。
+出力を上げれば 60 秒で切れ、下げればツール呼び出しが壊れる、という板挟み。
+
+### 再発防止
+`PROMPT.md` の冒頭に「実行環境の要件」節を追加し、
+作業前にゲートウェイの応答時間上限を測る curl コマンドを載せた。
+必要量（コンテキスト 48k 以上、出力 4000 トークン以上、時間上限 180 秒以上）も明記した。
+
+---
+
+## Issue: 出力上限を下げるとモデルがタスク自体を見失う
+
+### 症状
+60 秒制限を避けるため `limit.output` を 1500 に下げたところ、
+STEP 1 の出力が途中で切れ、その直後にモデルがこう応答した。
+
+```
+**STEP 1: 棚卸し**
+Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.
+...
+I need more context about what we were working on. Let me check the project state:
+...
+This is a fresh session — I don't have prior conversation history. Based on the
+workspace contents, there's an existing weather forecast project:
+...
+If you'd like to continue work on this or something else, let me know what to do next.
+```
+
+PROMPT.md を読んだことも、移植作業中であることも忘れている。
+
+### 影響
+作業が中断するだけでなく、**モデルが「指示されていない」と判断して
+勝手に別の提案を始める。** 放置すると無関係な作業をされる危険がある。
+
+### 原因候補
+1. 出力の打ち切りで会話が壊れた
+2. コンテキスト長超過による履歴の切り詰めで PROMPT.md が落ちた
+3. モデル側のセッション管理の問題
+
+### 切り分け
+この時点の設定は `context: 32000`。
+実測で STEP 0 の参照ファイル 5 点だけで 19,658 トークンある。
+
+```
+PROMPT.md                 7055
+skill-to-mcp.md           7349
+SKILL.md                   714
+server.py                 2191
+test_server.py            2349
+                  合計  19,658
+```
+
+ここに opencode のシステムプロンプトとツール定義が加わるため、
+最初の応答を始める時点で 32000 にかなり近い。
+`context` を 60000 に上げた試行 4 では同じ現象は起きなかった。
+
+### 実際の原因
+推測: コンテキスト長の切り詰めで PROMPT.md が履歴から落ちた（候補 2）。
+opencode の切り詰めアルゴリズムは確認していないため断定しない。
+ただし context を上げると再現しなくなったことから、整合する。
+
+### 解決策
+1. `limit.context` を実機の上限（65536）に近づける
+2. **PROMPT.md 側の対策**: STEP 1〜4 の成果物を会話ではなく
+   `docs/porting-notes.md` に書かせる。
+   会話が切り詰められても、ファイルに残っていれば読み直せる。
+
+### 解決確認
+context を 60000 にした試行では、タスクを見失う現象は再現しなかった。
+`porting-notes.md` への書き出し指示も機能し、STEP 1〜2 の内容がファイルに残った。
+
+### 再発防止
+PROMPT.md の「作業の全体像」直後に「途中経過はファイルに書いてください」節を追加した。
+理由（会話は切り詰められるが、ファイルは残る）も併記した。

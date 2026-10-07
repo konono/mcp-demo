@@ -1085,3 +1085,127 @@ $ grep -n "^#\{1,3\} " search-mcp/docs/skill-to-mcp.md
 
 ### 次の判断
 コミットして push する。ユーザーは現地（OpenShift 環境）での検証に移る。
+
+---
+
+## Step 17: PROMPT.md の実機検証（opencode + Qwen 3.6 35B A3B）
+
+### 目的
+Step 16 で作成した `PROMPT.md` を、想定読者である 30B 級モデルに
+実際に実行させ、有効性を確認する。
+
+### 背景
+Step 16 の時点では「実際に 30B 級のモデルに渡して移植させる検証は行っていない。
+手元に該当モデルの実行環境が無いため。有効性は設計上の推論にとどまる」と記録した。
+ユーザーから LiteLLM MaaS Gateway（Qwen 3.6 35B A3B）の接続情報が提供され、
+検証が可能になった。
+
+### 事前仮説
+PROMPT.md の構造（STEP 分割・判断表・出力フォーマット固定）が効けば、
+棚卸し表と仕分け表が指定どおりの形で出てくるはず。
+懸念はコンテキスト長で、STEP 0 で 5 ファイルを読むと
+申告された 32000 トークンを圧迫すると見込んだ。
+
+### 実行内容
+
+**変更・操作:**
+
+1. `opencode` を mise でインストール（1.18.34）。グローバル設定に追加した。
+   `python@3.12` と `uv` もグローバルに設定した（検証用ワークスペースが
+   リポジトリ外にあり、mise の shim がプロジェクト外で解決できなかったため）。
+
+2. 検証用ワークスペース `~/opencode-trial/` を作成。
+   リポジトリ外に置いたのは、生成物や認証情報を誤ってコミットしないため。
+   - `PROMPT.md` / `search-mcp/` / `search-demo/` / `Containerfile` をコピー
+   - 新しい移植対象 `weather-demo/` を作成（下記）
+   - `opencode.json`（ユーザー提供の設定をそのまま使用）
+   - トークンは `.vllm-token`（600）に置き、検証終了後に削除した
+
+3. 移植対象として `weather-demo/` を新規作成。
+   Open-Meteo の公開 API で複数都市の天気予報を取る依存ゼロのスクリプト
+   （`weather_demo.py`、約 120 行）と `SKILL.md`（62 行）。
+   見本と同じ「外部 API を読むだけ」型にしつつ、
+   `PROMPT.md` が警告している罠を意図的に仕込んだ:
+   - 選択肢が固定のオプション `-m`（Literal になるべき）
+   - 範囲のある数値 `-d` は 1〜14（ge/le になるべき）
+   - 「一度に 5 都市程度まで」というレート制限の注意書き
+     （DESCRIPTION だけでなく SCHEMA + GUARD になるべき）
+   - `python3 weather_demo.py` という実行方法の記述（DROP されるべき）
+   - 部分失敗の仕様（errors フィールドになるべき）
+
+   動作確認:
+   ```
+   $ python3 weather-demo/weather_demo.py Tokyo Osaka -d 2 -f text
+   # Tokyo (日本)
+     date=2026-10-07  temperature=25.0  precipitation=0.0  wind=9.3
+     date=2026-10-08  temperature=24.0  precipitation=0.0  wind=5.1
+   # Osaka (日本)
+     date=2026-10-07  temperature=24.2  precipitation=0.0  wind=11.2
+     date=2026-10-08  temperature=26.2  precipitation=0.0  wind=7.9
+   ```
+
+4. `opencode run --auto` で移植を指示。計 4 回試行した。
+
+**観察した出力:**
+
+| 試行 | 設定 | 結果 |
+|---|---|---|
+| 1 | context 32000 / output 8000（ユーザー提供のまま） | 参照ファイル読了後に `Cannot connect to API: The socket connection was closed unexpectedly` |
+| 2 | context 32000 / output 1500 | STEP 1 の途中で出力が切れ、その後モデルが「This is a fresh session — I don't have prior conversation history」と応答。タスクを見失った |
+| 3 | context 60000 / output 1200 | opencode が起動後に停止し、15 分間ログも出力も無し。原因未特定（stdin を閉じていなかった可能性） |
+| 4 | context 60000 / output 1200、stdin を `/dev/null` に | STEP 0〜2 は成功。STEP 5 以降のファイル生成で `Invalid input for tool write: JSON parsing failed` が 17 回発生し、完走せず |
+
+試行 4 の成果物 `weather-mcp/docs/porting-notes.md`:
+STEP 1 の棚卸し表を指定フォーマットどおりに出力し、内容も正確だった
+（`-d` の範囲 1〜14、`-m` の選択肢、出力の JSON 構造、読み取り専用の判定）。
+STEP 2 も `#5`（外部 API を読むだけ）を正しく選択した。
+
+**参照した情報源:**
+- ゲートウェイ `/v1/models`（モデル ID の確認）
+- ゲートウェイ `/v1/chat/completions`（制限の測定。詳細は findings）
+- `/tmp/oc-run1.log` 〜 `/tmp/oc-run4.log`
+- `~/.local/share/opencode/log/opencode.log`
+- 生成物 `~/opencode-trial/weather-mcp/docs/porting-notes.md`
+
+### 期待結果
+PROMPT.md の STEP に沿って移植が進み、最低でも仕分け表まで到達する。
+
+### 実際の結果
+STEP 0〜2 は意図どおり動いたが、STEP 3 以降には到達しなかった。
+原因は PROMPT.md の記述ではなく、**ゲートウェイの 60 秒応答時間上限**だった
+（findings に 2 件として記録）。
+
+測定結果の要点:
+- 生成に 60 秒以上かかるリクエストは stream の有無を問わず切断される
+- スループットは約 33 tok/s。したがって 1 応答の出力上限は実質 1900 トークン
+- 実際のコンテキスト上限は 65536。ユーザー提供の設定は 32000 と申告しており、実機の半分
+- 入力長は制約にならない（43,180 トークンのプロンプトが 5 秒で成功）
+
+### 解釈
+事実: PROMPT.md の「判断を仰ぐのではなく表を引かせる」設計は、
+35B 級モデルに対して機能した。棚卸し表の全項目が正確に埋まり、
+移植判定も判定表の条件をなぞる形で正しい行を選んでいる。
+Step 16 で「設計上の推論にとどまる」としていた部分のうち、
+STEP 0〜2 については実証できた。
+
+事実: 出力上限 1200〜1500 トークンでは、ツール呼び出しの JSON が
+生成途中で打ち切られ、ファイルを書けない。
+これは「出力を抑えれば 60 秒制限を回避できる」という回避策が
+別の形で破綻することを示している。
+
+推測: 試行 2 でモデルがタスクを見失ったのは、
+context 32000 の申告に対して参照ファイル読了時点で上限に達し、
+opencode が履歴を切り詰めた結果、PROMPT.md ごと失われたためと考える。
+opencode の内部動作は確認していないため断定しない。
+
+事実: PROMPT.md の STEP 0 は「見本 4 ファイルを全部読め」と指示しているが、
+これらは実測で合計 19,658 トークンある
+（PROMPT.md 7055 / skill-to-mcp.md 7349 / SKILL.md 714 /
+server.py 2191 / test_server.py 2349）。
+32k コンテキストでは、この指示自体が作業を不可能にする。
+
+### 次の判断
+測定で判明した要件を PROMPT.md に反映する。
+具体的には (a) 実行環境の要件と測定方法を冒頭に追加、
+(b) 途中経過を会話ではなくファイルに書くよう指示を追加。
+検証用トークンは削除済み。ワークスペースはリポジトリ外のため影響なし。

@@ -429,3 +429,159 @@ def _bool(name: str, default: bool) -> bool:
 `deploy/openshift/configmap.yaml` の各キーについて、
 運用中に値を空にする運用が実際にあり得るかは未検討。
 現在のマニフェストは全キーに明示的な値を入れているため、この経路には入らない。
+
+---
+
+## Finding: MaaS ゲートウェイに 60 秒の応答時間上限があり、長い生成が必ず切断される
+
+### 調べた理由
+ユーザーから LiteLLM MaaS Gateway（Qwen 3.6 35B A3B）の接続情報が提供され、
+`PROMPT.md` を実際に opencode で試せるか確認することになった。
+1 回目の実行が `Cannot connect to API: The socket connection was closed
+unexpectedly` で落ちたため、原因を切り分けた。
+
+### 調査方法
+ゲートウェイの `/v1/chat/completions` に直接リクエストを送り、
+`stream` と `max_tokens` を変えて成否と所要時間を測った。
+認証トークンは環境変数経由で渡した（値はここに記録しない）。
+
+### わかった事実
+
+**1. 生成に 60 秒以上かかるリクエストは、必ず切断される。**
+
+| stream | max_tokens | 結果 |
+|---|---|---|
+| false | 600 | OK（19 秒） |
+| false | 6000 | RemoteDisconnected（60 秒） |
+| true | 600 | OK（18 秒） |
+| true | 6000 | RemoteDisconnected（60 秒） |
+
+ストリーミングでも回避できない。`stream=true` でも切断までに受信した
+SSE チャンクは 0 件だった（ゲートウェイが応答全体をバッファしている）。
+
+**2. スループットは約 33 tok/s。したがって出力上限は実質 1900 トークン前後。**
+
+| max_tokens | completion | 所要 | tok/s |
+|---|---|---|---|
+| 400 | 400 | 11.9s | 33.7 |
+| 800 | 800 | 29.5s | 27.1 |
+| 1200 | 1200 | 37.2s | 32.3 |
+| 1600 | 1600 | 47.6s | 33.6 |
+| 2000 | — | 59s で切断 | — |
+
+**3. 実際のコンテキスト上限は 65536 トークン。** ユーザー提供の
+`opencode.json` の `limit.context` は 32000 で、実機の半分を申告していた。
+
+```
+litellm.ContextWindowExceededError: This model's maximum context length is
+65536 tokens. However, you requested 16 output tokens and your prompt
+contains at least 65521 input tokens
+```
+
+**4. 入力側は 60 秒制限にほぼ掛からない。** 43,180 トークンの
+プロンプトでも 5 秒で応答が返った（出力 16 トークン）。
+制約は出力トークン数であって入力長ではない。
+
+### 根拠
+いずれもゲートウェイへの実リクエストの結果。
+エンドポイント: `https://maas-rhdp.apps.maas.redhatworkshops.io/v1`
+モデル ID: `qwen36-35b-a3b`（`/v1/models` で確認、1 件のみ）
+認証: Bearer トークン（値は `<REDACTED>`）
+
+### 作業への影響
+`PROMPT.md` の内容ではなく、**実行基盤の制約**が移植作業の成否を決める。
+
+出力 1900 トークンでは、`server.py` 相当のファイルを 1 回の `write`
+ツール呼び出しで書き切れない。実際に opencode の実行では
+`Invalid input for tool write: JSON parsing failed` が 17 回発生した。
+ツール呼び出しの JSON が生成途中で打ち切られ、パースに失敗している。
+
+つまり次の板挟みになる:
+
+- 出力上限を上げる → 60 秒を超えて接続が切れる
+- 出力上限を下げる → ツール呼び出しの JSON が途中で切れる
+
+対策は「1 ファイルを複数回の追記に分割する」しかない。
+
+### 未確認事項
+- 60 秒がどのレイヤの設定か（OpenShift Route の `haproxy.router.openshift.io/timeout`、
+  LiteLLM 側、vLLM 側のいずれか）は特定していない。外部からは区別できない。
+- この制限がこの検証環境固有か、MaaS の恒常的な設定かは不明。
+- 延長可能かどうかも不明。ゲートウェイの管理者に確認が要る。
+
+---
+
+## Finding: PROMPT.md の STEP 1〜2 は 35B モデルで意図どおり機能した
+
+### 調べた理由
+`PROMPT.md` は 30B 級モデル向けに書いたが、Step 16 の時点では
+実際に走らせた検証をしていなかった（「設計上の推論にとどまる」と記録した）。
+実機が使えるようになったので確認した。
+
+### 調査方法
+検証用のワークスペース `~/opencode-trial/` を作り、次を配置した。
+
+- `PROMPT.md` と `search-mcp/` `search-demo/`（見本一式）
+- 新しい移植対象として `weather-demo/`（Open-Meteo で複数都市の天気予報を
+  取る依存ゼロの Python スクリプト + `SKILL.md`）
+- opencode の設定（provider = litellm、model = qwen36-35b-a3b）
+
+`weather-demo` には `PROMPT.md` が警告している罠を意図的に仕込んだ。
+選択肢が固定のオプション（`-m`）、範囲のある数値（`-d` は 1〜14）、
+「一度に 5 都市程度まで」というレート制限の注意書き、
+`python3 weather_demo.py` という実行方法の記述、部分失敗の仕様。
+
+opencode を非対話モード（`opencode run --auto`）で実行した。
+
+### わかった事実
+
+**STEP 0〜2 は完全に意図どおり動いた。**
+
+1. モデルは指示どおり `PROMPT.md` を最初に読み、続いて見本 4 ファイル
+   （`skill-to-mcp.md` / 見本の `SKILL.md` / `server.py` / `test_server.py`）を
+   読んだ。STEP 0 の「見本を読んでから書き始める」は守られた。
+2. 自発的に STEP 単位の TODO リストを作った。
+3. STEP 1 の棚卸し表を、指定したフォーマットどおりに出力した。
+   内容は正確で、`-d` の範囲 1〜14、`-m` の選択肢、出力の JSON 構造、
+   「読み取り専用」「添付ファイルなし」をすべて正しく埋めていた。
+4. STEP 2 の移植判定で `#5`（外部 API を読むだけ）を正しく選び、
+   理由も「ローカルファイルの読書きなし、副作用なし、添付ファイルなし」と
+   判定表の条件をなぞる形で書いた。
+
+実際に生成された `weather-mcp/docs/porting-notes.md` の STEP 2 部分:
+
+```markdown
+## STEP 2: 移植判定
+
+- 当てはまった行: #5
+- 理由: 外部 API を読むだけ（Open-Meteo 天気予報）。ローカルファイルの
+  読書きなし、副作用なし、添付ファイルなし
+- 追加で読んだ節: なし
+- 続行: そのまま続行
+```
+
+**STEP 3 以降には到達できなかった。** 原因は上記の 60 秒制限であって、
+`PROMPT.md` の記述ではない。
+
+### 根拠
+- 生成物 `~/opencode-trial/weather-mcp/docs/porting-notes.md`（STEP 1〜2 を記載）
+- opencode の実行ログ `/tmp/oc-run4.log`（`Invalid Tool` が 17 回）
+- opencode のログ `~/.local/share/opencode/log/opencode.log`
+
+### 作業への影響
+「判断を仰ぐのではなく表を引かせる」という `PROMPT.md` の設計方針は、
+35B 級モデルに対して有効だと確認できた。
+出力フォーマットを固定したことで、生成物が検証可能な形で残ることも確認できた。
+
+一方で、**ファイルを書く工程が実行基盤の出力上限に当たる**ことが分かった。
+`PROMPT.md` には「1 ファイルを 1 回で書く」前提のテンプレートを載せているが、
+出力上限が厳しい環境では分割して書く必要がある。
+
+### 未確認事項
+- STEP 3（仕分け）以降の品質は未検証。60 秒制限のため到達していない。
+- 制限の緩いゲートウェイであれば完走するかどうかも未確認。
+- 1 回目の試行では、コンテキストを 32000 と申告した状態で
+  参照ファイルを読み切った直後にモデルが
+  「This is a fresh session — I don't have prior conversation history」と応答した。
+  コンテキスト切り詰めで `PROMPT.md` ごと失われたと推測するが、
+  opencode の内部動作は確認していないため断定しない。
