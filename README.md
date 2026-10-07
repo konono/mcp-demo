@@ -121,3 +121,7 @@ oc apply --dry-run=server -k search-mcp/deploy/openshift/
 
 Python 3.12 / uv（`mise.toml` に記載）。MCP SDK は 2.x 系（`mcp>=2.3,<3`）。
 1.x とは API 非互換（`FastMCP` → `MCPServer`）。
+
+## ライセンス
+
+MIT License — [LICENSE](LICENSE)

@@ -7,6 +7,7 @@ name = "search-mcp"
 version = "1.0.0"
 description = "search-demo の公開 API 横断検索を MCP (Streamable HTTP) サーバーとして公開する"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     # MCP Python SDK 2.x。1.x の FastMCP は MCPServer に改名されており、本実装は 2.x 前提。

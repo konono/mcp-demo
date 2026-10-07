@@ -771,3 +771,33 @@ main
 $ gh api repos/konono/mcp-demo/contents --jq '.[].name' | tr '\n' ' '
 .dockerignore .gitignore Containerfile README.md mise.toml search-demo search-mcp
 ```
+
+---
+
+## Phase 13: MIT ライセンスの追加
+
+### 既存の pyproject.toml の確認
+
+```
+$ grep -n "license\|^name\|^version\|classifiers" -A2 search-mcp/pyproject.toml search-demo/pyproject.toml
+search-mcp/pyproject.toml:6:name = "search-mcp"
+search-mcp/pyproject.toml:7:version = "1.0.0"
+search-mcp/pyproject.toml-8-description = "search-demo の公開 API 横断検索を MCP (Streamable HTTP) サーバーとして公開する"
+search-mcp/pyproject.toml-9-readme = "README.md"
+search-demo/pyproject.toml:6:name = "search-demo"
+search-demo/pyproject.toml:7:version = "1.0.0"
+search-demo/pyproject.toml-8-description = "公開 API を横断検索する Python デモスクリプトと、それを opencode から呼び出す Skill"
+search-demo/pyproject.toml-9-readme = "README.md"
+```
+
+→ どちらにも `license` フィールドが無いことを確認。
+
+### ビルドとテスト
+
+```
+$ cd /Users/kono/gitrepo/mcp-demo/search-mcp && uv lock && uv run pytest -q
+Resolved 48 packages in 1ms
+Installed 2 packages in 9ms
+.........                                                                [100%]
+9 passed in 2.65s
+```

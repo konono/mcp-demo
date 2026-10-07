@@ -633,3 +633,75 @@ gh api repos/konono/mcp-demo/contents --jq '.[].name'
 ### 次の判断
 この Step 12 とフェーズ 12 の記録自体が未コミットなので、追記後に 2 つ目の
 コミットとして push する。
+
+---
+
+## Step 13: MIT ライセンスの追加
+
+### 目的
+public リポジトリにライセンス表記を追加し、第三者が利用できる状態にする。
+
+### 背景
+Step 12 で public として公開したが LICENSE ファイルが無かった。
+ライセンス表記の無い公開リポジトリは法的には全権利留保の扱いになり、
+リファレンス実装として参照・再利用してもらう意図と矛盾する。
+最終報告でこの点を指摘し、ユーザーが MIT を選択した。
+
+### 事前仮説
+- `LICENSE` ファイルの設置だけで GitHub はライセンスを認識する
+- `pyproject.toml` の `license` フィールドも揃えておくべき
+- PEP 639 の SPDX 文字列形式（`license = "MIT"`）が現行の書き方だが、
+  hatchling のバージョンが対応しているかは未確認
+
+### 実行内容
+
+**変更 1: `/Users/kono/gitrepo/mcp-demo/LICENSE` を新規作成**
+MIT License 全文。著作権表記は `Copyright (c) 2026 konono`
+（`gh auth status` で確認済みのアカウント名を使用）。
+
+**変更 2: `/Users/kono/gitrepo/mcp-demo/search-mcp/pyproject.toml`**
+`readme = "README.md"` の次行に `license = "MIT"` を追加。
+
+当初 `license-files = ["../LICENSE"]` も併記したが、
+プロジェクトルート外のパスを hatchling が受け付けるか不明だったため削除した。
+LICENSE はリポジトリルートにあり、2 つのパッケージから共有される配置になっている。
+
+**変更 3: `/Users/kono/gitrepo/mcp-demo/search-demo/pyproject.toml`**
+同様に `license = "MIT"` を追加。
+
+**変更 4: `/Users/kono/gitrepo/mcp-demo/README.md`**
+末尾に「## ライセンス」節を追加し、LICENSE へリンクした。
+
+**操作: ビルドとテストの確認**
+```
+cd search-mcp && uv lock && uv run pytest -q
+```
+
+### 期待結果
+- `license = "MIT"`（SPDX 文字列形式）を hatchling が受け付け、ビルドが通ること
+- 既存のテスト 9 件が通ること
+
+### 実際の結果
+```
+Resolved 48 packages in 1ms
+Installed 2 packages in 9ms
+.........                                                                [100%]
+9 passed in 2.65s
+```
+
+`Installed 2 packages` は `search-demo` と `search-mcp` の両ホイールが
+再ビルドされたことを示しており、**両方の `pyproject.toml` の
+`license = "MIT"` を hatchling が受け付けた**ことの確認になっている。
+
+### 解釈
+事実: PEP 639 の SPDX 文字列形式がこの hatchling バージョンで有効であり、
+ビルドとテストに影響はない。
+
+推測: `license-files` を省いたため、ビルドされたホイールの `.dist-info` に
+LICENSE ファイル自体は同梱されていない可能性がある。
+このパッケージは PyPI 公開を想定しておらず（`[tool.uv.sources]` のパス依存）、
+リポジトリルートに LICENSE があれば用は足りるため、確認していない。
+
+### 次の判断
+コミットして push する。GitHub 側がライセンスを認識したかを
+`gh repo view --json licenseInfo` で事後確認する。
