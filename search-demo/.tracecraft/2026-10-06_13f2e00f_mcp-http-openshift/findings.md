@@ -725,3 +725,69 @@ PROMPT.md の STEP 3 に「## 使い方 のコードブロックを表から落�
 - STEP 6〜9（周辺ファイル・テスト・コンテナ・ドキュメント）は実行していない。
 - 生成された `server.py` を実際に起動・テストしていない。構文も検証していない。
 - 1 回の試行の結果であり、再現性は未確認。
+
+---
+
+## Finding: opencode 実クライアントからの接続で、スキーマ強制が機能することを確認した
+
+### 調べた理由
+
+本プロジェクトの要件は「opencode から MCP として使えること」だった。
+しかし検証は curl による生の JSON-RPC までで、
+`examples/opencode.json` は一度も opencode に読ませていなかった。
+
+### 調査方法
+
+`search-mcp` をローカル起動（`127.0.0.1:8080`、`MCP_AUTH_TOKENS=dev-token`）し、
+opencode 1.18.34 + `qwen36-35b-a3b` から 4 パターン実行した。
+
+### わかった事実
+
+1. `"type": "remote"` + `headers.Authorization` の設定で接続できる。
+   `{env:SEARCH_MCP_TOKEN}` の展開も動く。
+
+2. ツールは `<MCP サーバー名>_<ツール名>` で登録される。
+   `opencode.json` のキーを `search` にしたので `search_search` になった。
+
+3. **スキーマの上限がクライアント経由でも強制される。**
+   `limit=100` を指定すると Pydantic が弾き、モデルは次を受け取った。
+
+   ```
+   Error executing tool search: 1 validation error for searchArguments
+   limit
+     Input should be less than or equal to 20 [type=less_than_equal, input_value=100, input_type=int]
+   ```
+
+   モデルはこれを読んで「`limit` の上限は 20 です」と回答した。
+
+4. **トークンが誤っているとき、エージェントは無言で別手段に逃げる。**
+   サーバーは 401 を返すが、opencode はツールを提示せず、
+   `WebFetch` で Wikipedia API を直接叩いて回答を作った。
+   ユーザーからは成功と区別がつかない。
+
+5. 401 を受けた opencode は OAuth ディスカバリに進む
+   （`/.well-known/oauth-authorization-server` →
+   `/.well-known/openid-configuration` → `POST /register`）。
+   いずれも 401 を返すと諦める。`auth.py:1-15` の設計意図どおり。
+
+### 根拠
+
+サーバーログ `/tmp/mcp-server.log`（`POST /mcp` 10 件、401 計 12 件、
+`INFO search_mcp.server search query='asyncio' sources=['github'] limit=3 lang=ja`）と、
+opencode の標準出力。Step 19 の worklog に全文を記録した。
+
+### 作業への影響
+
+`docs/skill-to-mcp.md` の前提が実クライアントで裏付けられた。
+これまでは「curl で弾けた」までしか言えなかった。
+
+`docs/clients.md` に §1.6〜1.8 を追加し、§3 の切り分け表に
+「エラーは出ないがツールが使われない」「`search` を指定しても呼ばれない」を足した。
+
+### 未確認事項
+
+- **Route 経由（TLS + 外部ホスト名 + DNS rebinding 保護 有効）での接続は未検証。**
+  上記はすべて平文 localhost で、`MCP_DNS_REBINDING_PROTECTION=false` にしている。
+- クラスタ内 Pod の agent framework（§2）からの接続も未検証のまま。
+- `list_search_sources` ツールは呼ばせていない。
+- 自動テスト化していない。手動検証であり、CI では回らない。

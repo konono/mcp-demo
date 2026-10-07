@@ -1291,3 +1291,95 @@ STEP 5 のコードは SDK の落とし穴 5 項目をすべて回避してい�
 PROMPT.md の「実行環境の要件」に推論モデルの節を追加し、
 STEP 3 に「使い方のコードブロックを落としがち」という注意を追記した。
 コミットしてユーザーに報告する。
+
+---
+
+## Step 19: opencode を実クライアントとして search-mcp に接続する
+
+### 目的
+
+「opencode から MCP として使う」という本来の要件が、実際に動くかを確認する。
+
+### 背景
+
+ユーザーから「mcp を opencode で実際に使うというところは検証されているか」と
+問われた。確認したところ、検証していなかった。
+`search-mcp/examples/opencode.json` はドキュメントを読んで書いただけで、
+opencode に読み込ませたことがない。E2E 36 件は生の JSON-RPC を curl で叩くもので、
+opencode は登場しない。`docs/clients.md` には検証状況の節が無かった。
+
+### 事前仮説
+
+`examples/opencode.json` の形式は正しいはずだが、未検証なので断定できない。
+
+### 実行内容
+
+**変更・操作**
+
+1. `search-mcp` をローカル起動した。
+   `MCP_AUTH_TOKENS=dev-token MCP_DNS_REBINDING_PROTECTION=false MCP_JSON_RESPONSE=true uv run search-mcp`
+2. opencode のバイナリが消えていた（`which opencode` が空、
+   `/home/agent/.local/share/mise/installs/opencode/` も存在しない）。
+   `mise use -g opencode@latest` で再インストールした（1.18.34）。
+3. `~/oc-mcp-test/opencode.json` に、LiteLLM プロバイダ定義と
+   `mcp.search` の remote 設定（`http://127.0.0.1:8080/mcp`）を書いた。
+4. 4 つの確認を順に実行した: ツール列挙 / ツール呼び出し /
+   `limit=100` でのスキーマ上限 / 誤ったトークン。
+5. `{env:SEARCH_MCP_TOKEN}` 展開の確認。1 回目は python3 の shim が無く
+   設定の書き換えが失敗していたため、`mise use -g python@3.12` で直して再実行した。
+
+**観察した出力**
+
+- ツール列挙: opencode が `search` サーバーを認識し、
+  Wikipedia / Hacker News / GitHub / Stack Overflow を列挙した。
+- ツール呼び出し: `search_search {"query":"asyncio","sources":["github"],"limit":3}`
+  が成功。サーバーログに
+  `INFO search_mcp.server search query='asyncio' sources=['github'] limit=3 lang=ja`。
+- `limit=100`:
+  `Error executing tool search: 1 validation error for searchArguments / limit /
+  Input should be less than or equal to 20`
+  がモデルまで届き、モデルが「`limit` の上限は 20 です」と回答した。
+- 誤トークン: サーバーログに 401。opencode はツールを提示せず、
+  **代わりに WebFetch で Wikipedia API を直接叩いて回答した**。エラー表示は無し。
+- 401 の直後、opencode は `/.well-known/oauth-authorization-server`、
+  `/.well-known/openid-configuration`、`POST /register` を順に試し、
+  いずれも 401 を受けて諦めていた（サーバーログの 401 は計 12 件）。
+
+**参照した情報源**
+
+- `search-mcp/src/search_mcp/auth.py:1-15`（OAuth discovery を生やさない設計理由）
+- `search-mcp/examples/opencode.json`
+- サーバーログ `/tmp/mcp-server.log`
+
+### 期待結果
+
+接続できる。スキーマ上限はクライアント経由でも効く。
+
+### 実際の結果
+
+どちらも成立した。加えて、想定していなかった 2 点が見つかった。
+
+1. opencode はツールを `<サーバー名>_<ツール名>` で登録する。
+   実際の名前は `search_search` であって `search` ではない。
+2. トークンが違うとき、エージェントは**無言で別の手段に逃げる**。
+
+### 解釈
+
+**事実**: `docs/skill-to-mcp.md` の中心的な主張
+（description は「お願い」、スキーマは「サーバーが強制するルール」）が、
+実クライアント経由で成立することを初めて確認した。
+これまでは curl による生の JSON-RPC でしか確認していなかった。
+
+**事実**: 誤トークン時の WebFetch へのフォールバックは、
+ユーザーから見ると成功と区別がつかない。ドキュメントに警告が必要な挙動である。
+
+**推測**: OAuth discovery への 401 は `auth.py` の設計どおりの結果で、
+クライアントは正しく諦めている。ただし仕様上は 404 のほうが素直かもしれない。
+MCP 仕様の該当箇所を確認していないため断定しない。
+
+### 次の判断
+
+`docs/clients.md` に §1.6（検証状況）・§1.7（ツール名の接頭辞）・
+§1.8（認証失敗が無言になる件）を追加し、§3 の切り分け表に 2 行足した。
+README の検証状況にも 1 段落追加した。Route 経由（TLS + 外部ホスト名）は
+依然として未検証なので、その旨を明記した。

@@ -91,6 +91,64 @@ curl -s "https://$HOST/mcp" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
+### 1.6 検証状況（opencode 1.18.34 で実機確認済み）
+
+この節の設定は**実際に opencode から接続して確認してあります**。
+確認環境: opencode 1.18.34 / モデル `qwen36-35b-a3b`（OpenAI 互換ゲートウェイ）/
+`search-mcp` をローカルの `127.0.0.1:8080` で起動。
+
+| 確認したこと | 結果 |
+|---|---|
+| `"type": "remote"` でサーバーが登録される | ✅ `search` として認識された |
+| `headers` の `{env:SEARCH_MCP_TOKEN}` 展開 | ✅ 環境変数から解決された |
+| モデルからツールが見える | ✅ |
+| ツールが実際に呼べる | ✅ `{"query":"asyncio","sources":["github"],"limit":3}` が通った |
+| **スキーマの上限がクライアント経由でも効く** | ✅ `limit=100` が Pydantic で弾かれ、エラーがモデルまで届いた |
+
+弾かれたときモデルが受け取るメッセージ:
+
+```
+Error executing tool search: 1 validation error for searchArguments
+limit
+  Input should be less than or equal to 20 [type=less_than_equal, input_value=100, input_type=int]
+```
+
+`docs/skill-to-mcp.md` の前提（description は「お願い」、スキーマは「強制」）が、
+実クライアント経由で成立していることをここで確認しています。
+
+未確認: Route 経由（TLS + 外部ホスト名）での接続。上記はすべて平文の localhost です。
+
+### 1.7 ツール名にサーバー名の接頭辞が付く
+
+opencode はツールを `<MCP サーバー名>_<ツール名>` で登録します。
+`opencode.json` で `"search"` という名前にしたので、実際の呼び出しは
+**`search_search`** / **`search_list_search_sources`** になります。
+
+プロンプトやエージェント定義でツール名を直接指定する場合は接頭辞込みで書いてください。
+サーバー名を `search-mcp` にすると `search-mcp_search` になります。
+
+### 1.8 トークンが違うとき、エラーは出ません
+
+**これは運用上の罠です。** トークンが間違っていると、opencode は
+MCP サーバーの登録に失敗しますが、**エージェントは何も言わずに続行します。**
+ツールが最初から存在しなかったかのように振る舞い、
+`WebFetch` など別の手段で答えを作って returns します。
+
+実際に `SEARCH_MCP_TOKEN=wrong-token` で試したときの挙動:
+
+- サーバー側ログ: `POST /mcp ... 401 Unauthorized`
+- opencode: `search_search` を提示せず、代わりに Wikipedia API を直接 WebFetch
+- ユーザーから見ると**普通に成功したように見える**
+
+認証失敗は 401 を見ないと分かりません。つながったつもりで使い始める前に、
+必ず 1.5 の疎通確認か、「利用可能な MCP ツールを列挙して」で
+`search_search` が出ることを確かめてください。
+
+なお 401 を返すと opencode は OAuth ディスカバリに進みます
+（`/.well-known/oauth-authorization-server`、`/.well-known/openid-configuration`、
+`POST /register`）。本サーバーはこれらにも 401 を返し、クライアントは諦めます。
+共有トークン運用では意図どおりの挙動です（理由は `auth.py` の冒頭コメント）。
+
 ---
 
 ## 2. クラスタ内の Pod で動く agent framework から
@@ -210,3 +268,5 @@ tools = await client.get_tools()
 | `/healthz` は 200 だが `/mcp` が 503 | probe は通るがアプリの lifespan が起動していない。Pod のログを見る |
 | セッションが途中で切れる | `MCP_STATELESS_HTTP=false` のまま replica が複数。true に戻すか Route で cookie 固定する |
 | 長いリクエストが切れる | Route の `haproxy.router.openshift.io/timeout` を延ばす |
+| **エラーは出ないがツールが使われない** | 認証失敗。opencode は黙って別の手段に逃げる（1.8 参照）。サーバー側ログの 401 を見る |
+| プロンプトで `search` を指定しても呼ばれない | opencode のツール名は `search_search`（1.7 参照） |
