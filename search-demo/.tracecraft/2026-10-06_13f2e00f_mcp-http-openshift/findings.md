@@ -254,3 +254,132 @@ Unable to evaluate type annotations for callable 'search'
 
 ### 未確認事項
 なし。
+
+---
+
+## Finding: 許可されていない Host の拒否は 400 ではなく 421 Misdirected Request
+
+### 調べた理由
+E2E テストでコンテナを専用ネットワーク上に置き、`http://e2e-srv:8080/mcp` に
+curl したところ、認証は通るはずなのに想定外のステータスが返った。
+また、ドキュメント 3 箇所に「400 になる」と記載していたが、
+これは**実際に確認した値ではなく推測で書いたもの**だった。
+
+### 調査方法
+`MCP_DNS_REBINDING_PROTECTION` を既定（true）、`MCP_ALLOWED_HOSTS` を未設定のまま
+コンテナを起動し、クライアントコンテナから `/mcp` に POST してヘッダごと確認した。
+
+### わかった事実
+- 許可されていない Host では **`421 Misdirected Request`** が返り、
+  ボディは `Invalid Host header`
+- この検査は **`/mcp` にのみ適用される**。`custom_route` で生やした
+  `/healthz` `/readyz` には適用されず、Host に関係なく 200 を返す
+- `MCP_ALLOWED_HOSTS` に接続先の `host:port` を設定すると 200 になる
+
+### 根拠
+
+拒否時（`MCP_ALLOWED_HOSTS` 未設定）:
+
+```
+$ curl -s -X POST http://e2e-srv:8080/mcp -H "Authorization: Bearer tok-a" ... -D /tmp/h
+Invalid Host header
+HTTP/1.1 421 Misdirected Request
+date: Wed, 07 Oct 2026 00:38:25 GMT
+server: uvicorn
+content-length: 19
+```
+
+同じ条件で `/healthz` は 200（E2E Phase 3 の
+「ヘルスチェックは認証を素通りする」チェックが PASS している）。
+
+許可後（`MCP_ALLOWED_HOSTS=e2e-srv:8080`）:
+
+```
+HTTP/1.1 200 OK
+content-type: application/json
+{"jsonrpc":"2.0","id":1,"result":{"capabilities":{...},"instructions":"公開 API（...
+```
+
+### 作業への影響
+ドキュメント 3 ファイル 4 箇所の「400」を「421 Misdirected Request」に訂正した。
+
+- `search-mcp/docs/clients.md` のトラブルシュート表
+- `search-mcp/docs/deploy-openshift.md` の ConfigMap 節
+- `.tracecraft/.../final-guide.md` の §7 と §9
+
+あわせて「`/healthz` には適用されないため、**probe は通るのに `/mcp` だけ落ちる**
+という形で現れる」という切り分け情報を追記した。
+症状だけ見ると「アプリは生きているのにクライアントから使えない」となり、
+認証の問題と誤診しやすい。
+
+E2E テストに恒久的なチェックとして 2 件追加した
+（素の起動時と、ConfigMap 由来の設定で起動した Pod の両方）。
+
+### 未確認事項
+OpenShift Router（HAProxy）が 421 をそのまま透過するか、
+別のステータスに書き換えるかは未確認。Route 経由での挙動は実クラスタでの確認が必要。
+
+---
+
+## Finding: podman kube play で Deployment の probe 定義を検証できる
+
+### 調べた理由
+OpenShift クラスタが無い環境で、Deployment マニフェストをどこまで検証できるかを知りたかった。
+
+### 調査方法
+`kubectl kustomize` の出力から podman が解釈できる 3 種
+（ConfigMap / Service / Deployment）だけを抜き出し、Secret を足して
+`podman kube play --network e2e-net` で起動した。
+
+### わかった事実
+- podman は Deployment を受け付け、`<deployment名>-pod` という名前の Pod として起動する
+  （`replicas: 2` は無視され 1 つだけ起動する）
+- **Deployment の `livenessProbe` / `readinessProbe` が podman の healthcheck に変換される。**
+  `podman ps` の STATUS が `(healthy)` になることで、
+  probe のパス・ポート・タイミング設定が妥当だったことを確認できる
+- ConfigMap の `envFrom` と Secret の `secretKeyRef` も解決される。
+  Secret 由来のトークンで認証が通ることを確認した
+- Pod の DNS 名は Service 名ではなく `search-mcp-pod`。
+  Service 名でのアクセスを模すには `Host:` ヘッダを手で付ける必要がある
+- マニフェストが指すクラスタ内レジストリのイメージ名は、
+  ローカルイメージに同じタグを付ける（`podman tag`）ことで解決できる
+
+### 根拠
+
+```
+$ podman kube play --network e2e-net /tmp/e2e/secret.yaml /tmp/e2e/kube.yaml
+Secrets:
+96afaf2249c25aef5fab0e182
+Pod:
+a06b9684075f21c2ed3f3b31a65337d10b5693aaeb6b4e0490d5c3a5d0d3fbb6
+Container:
+b6c832333defa25217e8ce81442b41c63e2d0626817be586adddd51a2cceeb20
+
+$ podman ps --filter name=search-mcp-pod-server --format '{{.Status}}'
+Up 16 seconds (healthy)
+
+$ podman pod ps
+POD ID        NAME            STATUS   ...  # OF CONTAINERS
+a06b9684075f  search-mcp-pod  Running  ...  2
+```
+
+Pod 内のアプリログに probe からのアクセスが残っている:
+
+```
+INFO:     127.0.0.1:59738 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59748 - "GET /healthz HTTP/1.1" 200 OK
+```
+
+### 作業への影響
+E2E テストの Phase 5 として恒久化した
+（`search-mcp/tests/e2e/run-e2e.sh`）。
+`securityContext`・`envFrom`・`secretKeyRef`・probe・コンテナポートが
+実際に機能することを、クラスタ無しで確認できるようになった。
+
+### 未確認事項
+- **Route / NetworkPolicy / HPA / PDB は podman に概念が無く検証できない**
+- `replicas: 2` が無視されるため、複数 replica でのロードバランスと
+  stateless 動作は未検証
+- **API スキーマ検証にはならない。** podman は自前のパーサで解釈しており、
+  Kubernetes/OpenShift の admission による検証とは別物。
+  フィールド名の typo は依然として検出できない

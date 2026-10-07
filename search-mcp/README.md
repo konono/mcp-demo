@@ -55,7 +55,8 @@ search-mcp/
     __main__.py                     # uvicorn 起動
   deploy/openshift/                 # kustomize 一式
   examples/                         # opencode.json, agent-pod.yaml, smoke_client.py
-  tests/test_server.py              # 実 HTTP でのプロトコルテスト
+  tests/test_server.py              # 実 HTTP でのプロトコルテスト（単体）
+  tests/e2e/run-e2e.sh              # コンテナ・マニフェストまで含む E2E
 ```
 
 検索ロジックは `search-demo` 側にしかない。`pyproject.toml` の
@@ -80,11 +81,41 @@ MCP_URL=http://127.0.0.1:8080/mcp MCP_TOKEN=dev-token \
   uv run python examples/smoke_client.py "asyncio"
 ```
 
-テスト（外部 API は叩かない）:
+## テスト
+
+**単体**（9 件。外部 API は叩かない。`run_search` を差し替えて MCP レイヤだけを見る）:
 
 ```bash
-uv run pytest
+cd search-mcp && uv run pytest
 ```
+
+**E2E**（36 件。イメージをビルドして実際に起動し、curl で叩く）:
+
+```bash
+search-mcp/tests/e2e/run-e2e.sh
+
+#   E2E_SKIP_BUILD=1    イメージを再ビルドしない
+#   E2E_SKIP_NETWORK=1  外部 API を叩くチェックを飛ばす
+```
+
+単体テストが見ていない層をこちらで押さえている。
+
+| | |
+|---|---|
+| イメージのメタデータ | `USER 1001` / ENTRYPOINT / EXPOSE |
+| SCC 相当での起動 | 任意 UID（1000670000）/ read-only rootfs / cap-drop ALL |
+| **本番設定の経路** | `MCP_JSON_RESPONSE=true`（SSE 無効）と DNS rebinding 保護。**単体テストでは無効化しているため、ここでしか動かない** |
+| HTTP 契約 | 401 と `WWW-Authenticate`、probe の認証バイパス、許可外 Host の 421 |
+| MCP プロトコル | initialize / tools/list / tools/call を生の JSON-RPC で |
+| 外部 API への実疎通 | コンテナ内から GitHub 検索 |
+| Deployment マニフェスト | `podman kube play` で起動し、probe が healthy になるまで待つ |
+
+E2E は専用ネットワーク上にクライアントコンテナを置き、そこから curl する。
+DooD 環境では publish したポートがホスト側に出るため、
+テストを実行するプロセスからは到達できないため。
+
+検証できないもの: Route / NetworkPolicy / HPA / PDB（podman に概念が無い）、
+マニフェストの API スキーマ（クラスタが要る）。
 
 ## コンテナで動かす
 

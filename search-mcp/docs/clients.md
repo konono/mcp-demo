@@ -205,7 +205,7 @@ tools = await client.get_tools()
 |---|---|
 | 接続がタイムアウトする（クラスタ内） | NetworkPolicy。namespace に `mcp-client=search-mcp` ラベルが無い |
 | `401 Unauthorized` | トークン不一致。Secret 更新後に Pod を再起動したか確認 |
-| `400 Bad Request`（Route 経由のみ） | DNS rebinding 保護。ConfigMap の `MCP_ALLOWED_HOSTS` に Route ホストが無い |
+| `421 Misdirected Request` + `Invalid Host header` | DNS rebinding 保護。ConfigMap の `MCP_ALLOWED_HOSTS` に Route ホストが無い。`/healthz` には適用されないので「probe は通るのに `/mcp` だけ落ちる」形で現れる |
 | TLS 検証エラー（VM から） | Router の CA が VM の信頼ストアに無い（1.4 参照） |
 | `/healthz` は 200 だが `/mcp` が 503 | probe は通るがアプリの lifespan が起動していない。Pod のログを見る |
 | セッションが途中で切れる | `MCP_STATELESS_HTTP=false` のまま replica が複数。true に戻すか Route で cookie 固定する |

@@ -103,15 +103,21 @@ mcp-demo/
 
 | | |
 |---|---|
-| テスト 9 件 | ✅ `uv run pytest -q` |
-| 実 API 疎通 | ✅ 4 ソース混在で結果取得 |
-| コンテナ起動 | ✅ 任意 UID（1000670000）でも起動 |
+| 単体テスト 9 件 | ✅ `cd search-mcp && uv run pytest -q` |
+| **E2E テスト 36 件** | ✅ `search-mcp/tests/e2e/run-e2e.sh` |
+| コンテナ起動 | ✅ 任意 UID（1000670000）/ read-only rootfs / cap-drop ALL |
+| 本番設定の経路 | ✅ `MCP_JSON_RESPONSE=true` と DNS rebinding 保護を実際に通した |
+| Deployment の probe | ✅ `podman kube play` で healthy になることを確認 |
+| 実 API 疎通 | ✅ コンテナ内から GitHub 検索が返る |
 | kustomize レンダリング | ✅ 警告なしで 12 リソース |
 | **マニフェストの API スキーマ検証** | ❌ **未実施** |
+| Route / NetworkPolicy / HPA / PDB | ❌ podman では検証できない |
 
-クラスタが無い環境で作ったため、マニフェストはレンダリングが通ることしか
-確認できていない。フィールド名の typo や apiVersion の誤りは検出できていないので、
-配備前に実クラスタで確認すること。
+E2E は DooD 環境でも動くよう、専用ネットワーク上のクライアントコンテナから
+curl する構成にしてある（publish したポートにはこのプロセスから到達できないため）。
+
+クラスタが無い環境で作ったため、マニフェストの**フィールド名の typo や
+apiVersion の誤りは検出できていない**。配備前に実クラスタで確認すること。
 
 ```bash
 oc apply --dry-run=server -k search-mcp/deploy/openshift/

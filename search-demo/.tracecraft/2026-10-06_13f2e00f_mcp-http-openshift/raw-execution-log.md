@@ -801,3 +801,231 @@ Installed 2 packages in 9ms
 .........                                                                [100%]
 9 passed in 2.65s
 ```
+
+---
+
+## Phase 14: E2E テスト
+
+### 環境確認
+
+```
+$ podman --version
+podman version 6.1.3
+
+$ podman images | head -2
+REPOSITORY                     TAG     IMAGE ID      CREATED      SIZE
+localhost/search-mcp           1.0.0   5f9fbeea811d  9 hours ago  260 MB
+```
+
+ランタイムイメージに curl が無いことの確認:
+
+```
+$ podman run --rm --entrypoint="" search-mcp:1.0.0 sh -c 'which curl getent sh; echo "--- rpm"; command -v microdnf'
+sh: line 1: which: command not found
+--- rpm
+/usr/bin/microdnf
+```
+
+クライアント用イメージの取得:
+
+```
+$ podman pull -q registry.access.redhat.com/ubi9/ubi-minimal:latest
+37034df4924c3fc2b27ff1b1d80b5a112bc6e86c6107253d851f7bfaef942bac
+$ podman run --rm registry.access.redhat.com/ubi9/ubi-minimal:latest curl --version | head -1
+curl 7.76.1 (aarch64-koji-linux-gnu) libcurl/7.76.1 OpenSSL/3.5.8 zlib/1.2.11 nghttp2/1.43.0
+```
+
+### イメージの再ビルド
+
+```
+$ podman build -f Containerfile -t search-mcp:1.0.0 .
+...
+[2/2] COMMIT search-mcp:1.0.0
+time="2026-10-07T09:38:04+09:00" level=warning msg="HEALTHCHECK is not supported for OCI image format and will be ignored. Must use `docker` format"
+--> 2c6c24dabc8b
+Successfully tagged localhost/search-mcp:1.0.0
+```
+
+### ネットワーク越しの到達性
+
+```
+$ podman network create e2e-net
+e2e-net
+$ podman run -d --rm --name e2e-srv --network e2e-net -e MCP_AUTH_TOKENS=<REDACTED> -e MCP_JSON_RESPONSE=true search-mcp:1.0.0
+$ podman run --rm --network e2e-net registry.access.redhat.com/ubi9/ubi-minimal:latest \
+    curl -s -o /dev/null -w 'healthz=%{http_code}\n' http://e2e-srv:8080/healthz
+healthz=200
+```
+
+### 想定外: /mcp が 421 を返す
+
+```
+$ curl -s -X POST http://e2e-srv:8080/mcp -H "Authorization: Bearer <REDACTED>" \
+    -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize",...}' -D /tmp/h
+Invalid Host header
+--- headers
+HTTP/1.1 421 Misdirected Request
+date: Wed, 07 Oct 2026 00:38:25 GMT
+server: uvicorn
+content-length: 19
+```
+
+`MCP_ALLOWED_HOSTS=e2e-srv:8080` を設定して再実行:
+
+```
+{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"prompts":{"listChanged":false},"resources":{"listChanged":false,"subscribe":false},"tools":{"listChanged":false}},"instructions":"公開 API（Wikipedia / Hacker News / GitHub / Stack Overflow）を横断検索するサーバー。...
+--- status/session
+HTTP/1.1 200 OK
+content-type: application/json
+```
+
+→ `mcp-session-id` ヘッダは無し（stateless_http=true の確認）。
+→ `content-type: application/json`（MCP_JSON_RESPONSE=true の確認。SSE ではない）。
+
+### read-only rootfs + 任意 UID
+
+```
+$ podman run -d --rm --name e2e-ro --network e2e-net --read-only --tmpfs /tmp \
+    --user 1000670000:0 -e MCP_AUTH_TOKENS=<REDACTED> -e MCP_ALLOWED_HOSTS=e2e-ro:8080 search-mcp:1.0.0
+$ podman ps --filter name=e2e-ro --format '{{.Status}}'
+Up 3 seconds
+$ podman logs e2e-ro | tail -3
+2026-10-07 00:38:52,401 INFO mcp.server.streamable_http_manager StreamableHTTP session manager started
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+$ curl -o /dev/null -w 'ro-healthz=%{http_code}\n' http://e2e-ro:8080/healthz
+ro-healthz=200
+```
+
+### kustomize 出力の分解
+
+```
+$ kubectl kustomize search-mcp/deploy/openshift/ > /tmp/e2e/all.yaml
+$ grep -n '^kind:' /tmp/e2e/all.yaml
+2:kind: Namespace
+12:kind: ServiceAccount
+34:kind: ConfigMap
+44:kind: Service
+63:kind: Deployment
+163:kind: PodDisruptionBudget
+178:kind: HorizontalPodAutoscaler
+205:kind: NetworkPolicy
+229:kind: NetworkPolicy
+253:kind: NetworkPolicy
+277:kind: NetworkPolicy
+293:kind: Route
+```
+
+ConfigMap / Service / Deployment を抽出:
+
+```
+$ grep -n "image:\|MCP_ALLOWED_HOSTS\|secretKeyRef\|replicas" /tmp/e2e/kube.yaml
+3:  MCP_ALLOWED_HOSTS: search-mcp.apps.example.com,search-mcp.search-mcp.svc.cluster.local:8080,search-mcp:8080
+53:  replicas: 2
+83:            secretKeyRef:
+89:        image: image-registry.openshift-image-registry.svc:5000/search-mcp/search-mcp:1.0.0
+```
+
+### podman kube play
+
+```
+$ podman tag search-mcp:1.0.0 image-registry.openshift-image-registry.svc:5000/search-mcp/search-mcp:1.0.0
+$ podman kube play --network e2e-net /tmp/e2e/secret.yaml /tmp/e2e/kube.yaml
+Secrets:
+96afaf2249c25aef5fab0e182
+Pod:
+a06b9684075f21c2ed3f3b31a65337d10b5693aaeb6b4e0490d5c3a5d0d3fbb6
+Container:
+b6c832333defa25217e8ce81442b41c63e2d0626817be586adddd51a2cceeb20
+
+$ podman pod ps
+POD ID        NAME            STATUS   CREATED        INFRA ID      # OF CONTAINERS
+a06b9684075f  search-mcp-pod  Running  2 seconds ago  d9dcfd01215e  2
+
+$ podman ps --filter name=search-mcp-pod-server --format '{{.Status}}'
+Up 16 seconds (healthy)
+
+$ podman logs search-mcp-pod-server | tail -4
+INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+INFO:     127.0.0.1:59738 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59748 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34666 - "GET /healthz HTTP/1.1" 200 OK
+```
+
+DNS 名の確認（Service 名では引けない）:
+
+```
+$ for h in search-mcp-pod search-mcp; do echo -n "$h/healthz -> "; curl -s -m 5 -o /dev/null -w "%{http_code}\n" http://$h:8080/healthz || echo FAIL; done
+search-mcp-pod/healthz -> 200
+search-mcp/healthz -> 000
+FAIL
+```
+
+### E2E スクリプトの完走（ビルドを含む）
+
+```
+$ bash search-mcp/tests/e2e/run-e2e.sh
+== Phase 1: イメージのビルドとメタデータ
+  PASS podman build
+  PASS USER が 1001（root では動かない）
+  PASS ENTRYPOINT が search-mcp
+  PASS EXPOSE 8080
+
+== Phase 2: OpenShift の SecurityContext 相当での起動
+  PASS 任意 UID + read-only rootfs + cap-drop ALL で起動する
+  PASS 起動ログに session manager started が出る
+
+== Phase 3: HTTP 契約（ConfigMap と同じ設定で起動）
+  PASS GET /healthz が ok を返す
+  PASS GET /readyz が ready を返す
+  PASS readyz が stateless であることを報告する
+  PASS トークン無しの /mcp は 401
+  PASS 401 に WWW-Authenticate: Bearer が付く
+  PASS 誤ったトークンは 401
+  PASS ヘルスチェックは認証を素通りする（probe は Authorization を付けられない）
+  PASS 許可されていない Host は 421 で拒否される
+  PASS MCP_JSON_RESPONSE=true で SSE ではなく JSON が返る
+  PASS stateless_http=true ではセッション ID を発行しない
+  PASS initialize が成功する
+  PASS SKILL.md の作法が instructions に載っている
+  PASS 2 本目のトークンでも認証が通る
+  PASS tools/list に search がある
+  PASS tools/list に list_search_sources がある
+  PASS 使い分けの指針が description に載っている
+  PASS レート制限の注意が description に載っている
+  PASS MCP_MAX_LIMIT=10 が inputSchema に反映されている
+  PASS read_only_hint が申告されている
+  PASS list_search_sources が structuredContent を返す
+  PASS list_search_sources が 4 ソースを返す
+  PASS limit=999 が拒否される（契約としての強制）
+
+== Phase 4: 外部 API への実疎通
+  PASS コンテナから外部 API を検索できる
+  PASS 検索結果が github から返る
+
+== Phase 5: Deployment マニフェストを podman kube play で起動
+  PASS kustomize のレンダリング
+  PASS podman kube play が Deployment を起動できる
+  PASS Deployment の probe が healthy になる
+  PASS ConfigMap 由来の設定で /healthz が応答する
+  PASS Secret 由来のトークンで認証が通る
+  PASS ConfigMap の MCP_ALLOWED_HOSTS に無い Host は拒否される
+
+== 結果
+  PASS: 36
+  FAIL: 0
+EXIT=0
+```
+
+### クリーンアップと単体テストへの影響確認
+
+```
+$ podman ps -a --format '{{.Names}}' | grep -iE 'e2e|search-mcp'
+$ podman network ls --format '{{.Name}}' | grep e2e
+（いずれも出力なし）
+
+$ cd search-mcp && uv run pytest -q
+.........                                                                [100%]
+9 passed in 2.67s
+```

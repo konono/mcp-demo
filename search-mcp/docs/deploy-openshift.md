@@ -50,7 +50,10 @@ oc create secret generic search-mcp-auth \
 
 `deploy/openshift/configmap.yaml` の `MCP_ALLOWED_HOSTS` /
 `MCP_ALLOWED_ORIGINS` は DNS rebinding 対策の許可リストで、
-**ここを直さないと Route 経由のアクセスが 400 になる。**
+**ここを直さないと Route 経由のアクセスが
+`421 Misdirected Request` / `Invalid Host header` になる**
+（E2E テストで確認済み。`/healthz` には適用されないため、
+probe は通るのに `/mcp` だけ落ちるという形で現れる）。
 
 Route のホスト名を先に確定させる:
 

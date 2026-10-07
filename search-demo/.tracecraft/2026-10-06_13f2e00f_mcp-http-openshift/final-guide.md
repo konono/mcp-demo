@@ -351,7 +351,8 @@ MCP_URL="https://$HOST/mcp" MCP_TOKEN="$TOKEN" \
   uv run python search-mcp/examples/smoke_client.py "asyncio"
 ```
 
-**`MCP_ALLOWED_HOSTS` に Route ホストを入れ忘れると 400 になる**（401 ではない）。
+**`MCP_ALLOWED_HOSTS` に Route ホストを入れ忘れると `421 Misdirected Request` /
+`Invalid Host header` になる**（401 ではない。E2E テストで確認済み）。
 
 ---
 
@@ -418,7 +419,7 @@ Claude Agent SDK / LangChain での書き方は `search-mcp/docs/clients.md` §2
 |---|---|
 | タイムアウト（クラスタ内） | NetworkPolicy。namespace のラベル漏れ |
 | 401 | トークン不一致。Secret 更新後に `oc rollout restart` したか |
-| **400（Route 経由のみ）** | **`MCP_ALLOWED_HOSTS` に Route ホストが無い** |
+| **421 Misdirected Request** | **`MCP_ALLOWED_HOSTS` に Route ホストが無い**（`/healthz` は通る） |
 | TLS 検証エラー（VM） | Router の CA が VM に無い |
 | セッションが切れる | `MCP_STATELESS_HTTP=false` のまま replica 複数 |
 | 長いリクエストが切れる | Route の `haproxy.router.openshift.io/timeout` |

@@ -705,3 +705,146 @@ LICENSE ファイル自体は同梱されていない可能性がある。
 ### 次の判断
 コミットして push する。GitHub 側がライセンスを認識したかを
 `gh repo view --json licenseInfo` で事後確認する。
+
+---
+
+## Step 14: E2E テストの設計と実装
+
+### 目的
+ユーザーから「E2E テスト。container build して立ち上げて curl レベルで問題なく動くか。
+OpenShift 環境は無いが podman play などやれることを計画してテストしてほしい」
+という依頼があった。単体テスト（9 件）が触れていない層を実際に動かして検証する。
+
+### 背景
+直前の回答で、単体テストの穴として次を報告していた:
+- `search_demo` 本体のテストがゼロ
+- OpenShift の ConfigMap が設定する経路（`MCP_JSON_RESPONSE=true`）が未検証
+- DNS rebinding 保護はテストで**無効化**しており一度も動いていない
+- コンテナイメージに対するテストが無い（`podman exec` での手動確認のみ）
+- マニフェストの検証が無い
+
+このうちコンテナ・設定経路・マニフェストを E2E で埋める。
+
+### 事前仮説
+- DooD 環境のため publish ポートには到達できない（Step 7 の既知の制約）。
+  専用ネットワーク上にクライアントコンテナを置けば回避できるはず
+- ランタイムイメージ（ubi9/python-312-minimal）に curl は入っていない可能性が高い
+- `podman kube play` は Route / NetworkPolicy / HPA / PDB を解釈できないが、
+  Deployment / ConfigMap / Service / Secret は扱えるはず
+
+### 実行内容
+
+**操作 1: 環境の確認**
+```
+podman --version          → 6.1.3
+podman kube play --help   → 利用可能
+podman run --entrypoint="" search-mcp:1.0.0 sh -c 'which curl'
+                          → which 自体が無い。curl も無い
+```
+→ クライアント用に `registry.access.redhat.com/ubi9/ubi-minimal`（curl 7.76.1）を pull。
+
+**操作 2: イメージの再ビルド**
+既存イメージは 9 時間前のもので、Step 13 の `pyproject.toml` 変更を含まないため
+再ビルドした。`2c6c24dabc8b`。
+
+**操作 3: ネットワーク越しの到達性を確認（仮説検証）**
+```
+podman network create e2e-net
+podman run -d --name e2e-srv --network e2e-net ... search-mcp:1.0.0
+podman run --rm --network e2e-net ubi-minimal curl -w '%{http_code}' http://e2e-srv:8080/healthz
+  → healthz=200
+```
+→ DooD でも専用ネットワーク経由なら到達できることを確認。この方式で進める。
+
+**観察した出力（想定外）**: `/mcp` への POST が
+`HTTP/1.1 421 Misdirected Request` / `Invalid Host header` を返した。
+→ findings に「許可されていない Host の拒否は 400 ではなく 421」として記録。
+ドキュメント 3 ファイル 4 箇所の記述が誤りだったと判明。
+
+**操作 4: read-only rootfs の確認（未検証事項の解消）**
+```
+podman run -d --read-only --tmpfs /tmp --user 1000670000:0 ... search-mcp:1.0.0
+  → Up 3 seconds / ro-healthz=200
+```
+→ findings（Step 6）の未確認事項「`readOnlyRootFilesystem: true` は podman 単体では
+未検証」を解消した。
+
+**操作 5: podman kube play の確認**
+`kubectl kustomize` の出力（12 リソース）から ConfigMap / Service / Deployment を
+抽出し、Secret を足して起動。マニフェストが指すクラスタ内レジストリのイメージ名は
+`podman tag` でローカルイメージに別名を付けて解決した。
+→ `Up 16 seconds (healthy)`。**Deployment の probe が podman の healthcheck に
+変換され、実際に通ることを確認。** findings に記録。
+
+**変更: `/Users/kono/gitrepo/mcp-demo/search-mcp/tests/e2e/run-e2e.sh` を新規作成**
+上記の探索を 5 フェーズ 36 チェックとして恒久化した。
+
+- Phase 1: イメージのメタデータ（USER / ENTRYPOINT / EXPOSE）
+- Phase 2: SCC 相当（任意 UID + read-only rootfs + cap-drop ALL）
+- Phase 3: HTTP 契約（**ConfigMap と同じ設定で起動**。json_response / DNS 保護を有効に）
+- Phase 4: コンテナから外部 API への実疎通
+- Phase 5: `podman kube play` での Deployment 起動と probe
+
+設計上の判断:
+- クライアントコンテナは常駐させて `podman exec` する
+  （チェックごとにコンテナを起こすと 1 秒 × 20 回以上かかる）
+- `trap cleanup EXIT` でコンテナ・Pod・Secret・ネットワーク・一時ディレクトリを掃除
+- `E2E_SKIP_BUILD` / `E2E_SKIP_NETWORK` で部分実行できるようにした
+- 失敗時は expected / actual を出す。FAIL が 1 件でもあれば exit 1
+
+**変更: ドキュメントの訂正（4 箇所）**
+- `search-mcp/docs/clients.md` トラブルシュート表: 400 → 421。
+  「`/healthz` には適用されないので probe は通るのに `/mcp` だけ落ちる」を追記
+- `search-mcp/docs/deploy-openshift.md`: 同上
+- `.tracecraft/.../final-guide.md` §7 と §9: 同上
+
+**変更: README の更新**
+- ルート `README.md` の検証状況の表に E2E 36 件を追加し、
+  Route / NetworkPolicy / HPA / PDB が検証できないことを ❌ で明示
+- `search-mcp/README.md` に「テスト」節を新設。
+  単体と E2E の守備範囲の違いを表にした
+
+### 期待結果
+- 36 チェックすべて PASS
+- クリーンアップ後にコンテナ・ネットワークが残らない
+- 単体テスト 9 件に影響しない
+
+### 実際の結果
+
+ビルドを含む完走:
+```
+== 結果
+  PASS: 36
+  FAIL: 0
+EXIT=0
+```
+
+クリーンアップ確認:
+```
+$ podman ps -a --format '{{.Names}}' | grep -iE 'e2e|search-mcp'
+$ podman network ls --format '{{.Name}}' | grep e2e
+（いずれも出力なし）
+```
+
+単体テスト:
+```
+9 passed in 2.67s
+```
+
+### 解釈
+事実: 単体テストが触れていなかった 3 つの層（コンテナランタイム、
+本番設定の経路、Deployment マニフェスト）を実際に動かして確認できた。
+特に `MCP_JSON_RESPONSE=true` と DNS rebinding 保護は、
+**単体テストでは無効化しているためこれまで一度も実行されていなかった**。
+
+事実: ドキュメントに推測で書いた「400」が誤りだった。
+E2E を書いたことで、実装ではなく**ドキュメントのバグ**が 1 件見つかった。
+
+推測: `podman kube play` が通ることは API スキーマ検証の代わりにはならない。
+podman は自前のパーサで解釈しており、Kubernetes の admission とは別物のため、
+フィールド名の typo は依然として検出できないと考えられる。
+この点は findings の未確認事項に明記した。
+
+### 次の判断
+コミットして push する。残る穴は `search_demo` 本体の単体テストと
+`Settings.from_env()` のテストで、これらは E2E の対象外。
