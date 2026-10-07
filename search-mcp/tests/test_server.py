@@ -115,6 +115,25 @@ async def test_mcp_endpoint_requires_bearer_token() -> None:
             assert res.status_code == 401
 
 
+async def test_non_bearer_schemes_are_rejected() -> None:
+    """Basic や空白なしの値で素通りしないこと。"""
+    async with _serve(_settings(auth_tokens=["s3cret"])) as base:
+        async with _http(base) as client:
+            for value in ("Basic czNjcmV0", "s3cret", "bearers3cret", ""):
+                res = await client.post("/mcp", json={}, headers={"Authorization": value})
+                assert res.status_code == 401, value
+
+
+async def test_lowercase_bearer_is_accepted() -> None:
+    """RFC 7235 の auth-scheme は大文字小文字を区別しない。"""
+    async with _serve(_settings(auth_tokens=["s3cret"])) as base:
+        async with _http(base) as client:
+            res = await client.post(
+                "/mcp", json={}, headers={"Authorization": "bearer s3cret"}
+            )
+            assert res.status_code != 401
+
+
 async def test_valid_token_reaches_the_mcp_handler() -> None:
     async with _serve(_settings(auth_tokens=["s3cret"])) as base:
         async with _http(base, token="s3cret") as client:

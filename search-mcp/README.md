@@ -56,6 +56,7 @@ search-mcp/
   deploy/openshift/                 # kustomize 一式
   examples/                         # opencode.json, agent-pod.yaml, smoke_client.py
   tests/test_server.py              # 実 HTTP でのプロトコルテスト（単体）
+  tests/test_settings.py            # 環境変数パースの単体テスト
   tests/e2e/run-e2e.sh              # コンテナ・マニフェストまで含む E2E
 ```
 
@@ -83,10 +84,21 @@ MCP_URL=http://127.0.0.1:8080/mcp MCP_TOKEN=dev-token \
 
 ## テスト
 
-**単体**（9 件。外部 API は叩かない。`run_search` を差し替えて MCP レイヤだけを見る）:
+**単体**（38 件。外部 API は叩かない）:
 
 ```bash
 cd search-mcp && uv run pytest
+```
+
+| ファイル | 対象 |
+|---|---|
+| `tests/test_server.py` | MCP レイヤ。実 HTTP で起動し、`run_search` を差し替えて認証・スキーマ・structured output を見る |
+| `tests/test_settings.py` | `Settings.from_env()`。ConfigMap / Secret から来る文字列のパース（真偽値の表記ゆれ、カンマ区切り、空要素の除去） |
+
+検索ロジック本体のテストは `search-demo` 側にある（38 件）。
+
+```bash
+cd search-demo && uv run --extra dev pytest
 ```
 
 **E2E**（36 件。イメージをビルドして実際に起動し、curl で叩く）:

@@ -180,10 +180,12 @@ async def _serve(settings):
 
 外部 API は `monkeypatch.setattr(search_demo, "run_search", ...)` で差し替える。
 
-検証した項目（9 件、2.66 秒）:
+`tests/test_server.py` で検証した項目（11 件）:
 
 - `/healthz` `/readyz` が認証を素通りする
 - `/mcp` が認証なしで 401 + `WWW-Authenticate: Bearer` を返す
+- Bearer 以外のスキーム（`Basic`、スキーム無し、空文字）を拒否する
+- スキーム名の大文字小文字は区別しない（RFC 7235）
 - 正しいトークンでツール一覧が取れる
 - instructions とツール description に Skill のガイダンスが載っている
 - `MCP_MAX_LIMIT` が入力スキーマの `maximum` に反映される
@@ -191,10 +193,39 @@ async def _serve(settings):
 - `sources` 省略時に全ソースを引くこと
 - 上限超えの `limit` が外部 API に到達しないこと
 
+### 設定のパースは別ファイルで押さえる
+
+`tests/test_settings.py`（27 件）。ConfigMap / Secret から来る文字列の
+唯一の入口なので、間違えると「マニフェストは正しいのに既定値のまま」になる。
+
+特に押さえるべき境界:
+
+- 真偽値の表記ゆれ（`1` / `true` / `TRUE` / `yes` / `on` / 前後空白）
+- **未設定と空文字は別物**。`MCP_STATELESS_HTTP: ""` は既定（true）に戻らず
+  false になる。ConfigMap で「キーを消す」のと「値を空にする」は違う
+- カンマ区切りの空要素除去。`MCP_AUTH_TOKENS=" , , "` が
+  空トークンのリストになると認証が素通りする
+- `int` のパース失敗は例外にして起動時に落とす（既定値へ黙って戻さない）
+
+### 検索ロジック本体は別パッケージでテストする
+
+MCP 側のテストは `run_search` を差し替えているため、
+**検索ロジックが壊れても緑のままになる**。
+`search-demo/tests/test_search_demo.py`（38 件）で
+`urllib.request.urlopen` を差し替え、ネットワークに出ずに
+各 API のレスポンス形（欠けたフィールド、null の `description`、
+HTML エスケープ）とフォールバックを押さえる。
+
+ソースごとに件数パラメータ名が違う（`srlimit` / `hitsPerPage` /
+`per_page` / `pagesize`）ので、ここは明示的にテストしておく。
+
 ```bash
-uv run pytest -q
-# 9 passed in 2.66s
+cd search-mcp  && uv run pytest -q                # 38 passed
+cd search-demo && uv run --extra dev pytest -q    # 38 passed
 ```
+
+カバレッジは `search_demo.py` 99% / `search_mcp` 94%。
+未到達は `__main__.py`（uvicorn 起動部）のみで、こちらは E2E が通している。
 
 ---
 

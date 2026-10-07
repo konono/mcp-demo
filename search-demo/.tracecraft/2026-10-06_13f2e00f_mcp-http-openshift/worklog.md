@@ -848,3 +848,125 @@ podman は自前のパーサで解釈しており、Kubernetes の admission と
 ### 次の判断
 コミットして push する。残る穴は `search_demo` 本体の単体テストと
 `Settings.from_env()` のテストで、これらは E2E の対象外。
+
+---
+
+## Step 15: 単体テストの穴埋め（search_demo 本体と Settings.from_env）
+
+### 目的
+Step 14 で E2E を整えた結果、残る未検証領域が 2 つに絞れた。
+`search_demo.py`（検索ロジック本体）にテストが 1 件も無いことと、
+`Settings.from_env()` が単体テストから到達していないこと。これを埋める。
+
+### 背景
+既存の `search-mcp/tests/test_server.py` は `search_demo.run_search` を
+monkeypatch で差し替えている。MCP レイヤだけを見るための正しい設計だが、
+その結果として**検索ロジック本体が壊れてもテストは緑のまま**になる。
+E2E は実 API を 1 回叩くだけで、レスポンス形のバリエーション（欠けたフィールド、
+null の `description`、HTML エスケープ）は通らない。
+
+`Settings.from_env()` は ConfigMap / Secret から来る文字列の唯一の入口。
+ここを間違えると「マニフェストは正しいのに挙動が既定値のまま」という
+原因の見えにくい障害になる。E2E では正常系の組み合わせしか通らない。
+
+### 事前仮説
+- `search_demo` のテストは `urllib.request.urlopen` の差し替えで書ける。
+  本体は `http_get_json` 内で `urlopen` を呼ぶだけなので、HTTP を模す必要はない。
+- pytest を `search-demo` に入れると「依存ゼロ」という売りが崩れる懸念があるが、
+  `[project.optional-dependencies] dev` に置けば実行時依存は増えない。
+
+### 実行内容
+
+**変更・操作:**
+
+1. `search-demo/pyproject.toml` に dev extra を追加。
+   ```toml
+   # テストにだけ pytest が要る。実行時の依存ゼロは崩さない。
+   [project.optional-dependencies]
+   dev = ["pytest>=8"]
+   ```
+   `dependencies = []` はそのまま。
+
+2. `search-demo/tests/test_search_demo.py` を新規作成（38 件）。
+   `capture` フィクスチャで `urllib.request.urlopen` を差し替え、
+   リクエスト URL を記録しつつ固定の JSON を返す。カバー範囲:
+   - `http_get_json`: クエリ文字列の組み立て、日本語のパーセントエンコード、
+     リスト値の展開（`doseq=True`）、HTTPError / URLError / JSONDecodeError →
+     `SearchError` への正規化
+   - `strip_html`: タグ除去、エンティティ復元、入れ子、閉じていない `<b`
+   - 4 ソースのパース: Wikipedia の URL 組み立て（空白→`_`→quote）、
+     HN の `title`→`story_title`→`(no title)` フォールバックと
+     url 欠落時の `item?id=` フォールバック、GitHub の `description`/`language`
+     が null のケース、Stack Overflow のタイトルの unescape
+   - ソースごとに異なる件数パラメータ名（`srlimit` / `hitsPerPage` /
+     `per_page` / `pagesize`）を取り違えていないこと
+   - `run_search`: 複数ソースのマージ、部分失敗が `errors` に落ちること、
+     `SearchError` 以外は握り潰さないこと、出力順が入力順であること
+   - `main()`: 既定の全ソース展開、`-s` の重複排除、`-s all` の優先、
+     `max(1, limit)` のクランプ、終了コード（全滅時のみ 1）
+
+3. `search-mcp/tests/test_settings.py` を新規作成（27 件）。
+   `autouse` フィクスチャで `MCP_*` を全削除し、実行環境に依存させない。
+   既定値が README の表と一致すること、全変数が読まれること、
+   真偽値の表記ゆれ（`1`/`true`/`TRUE`/`yes`/`on`/前後空白）、
+   未知の値と空文字は false、**未設定と空文字が別物**であること、
+   カンマ区切りの空白除去と空要素除去、`int` パース失敗は例外にすること、
+   dataclass が frozen であることを確認。
+
+4. `search-mcp/tests/test_server.py` に 2 件追記。
+   `auth.py:62`（Bearer 以外のスキームを拒否）が未到達だったため、
+   `Basic ...` / スキーム無し / `bearers3cret` / 空文字で 401 になることと、
+   RFC 7235 どおり小文字 `bearer` は受けることを確認。
+
+**観察した出力:**
+
+```
+# search-demo
+38 passed in 0.04s
+Name             Stmts   Miss  Cover   Missing
+search_demo.py     102      1    99%   230
+
+# search-mcp
+38 passed in 3.70s
+src/search_mcp/__init__.py       5      0   100%
+src/search_mcp/__main__.py       9      9     0%   7-32
+src/search_mcp/app.py           27      0   100%
+src/search_mcp/auth.py          34      0   100%
+src/search_mcp/server.py        45      0   100%
+src/search_mcp/settings.py      27      0   100%
+TOTAL                          147      9    94%
+```
+
+**参照した情報源:**
+- `search-demo/search_demo.py` 全 231 行（各ソースのパースとフォールバックの確認）
+- `search-mcp/src/search_mcp/settings.py:13-21`（`_split` / `_bool` の仕様）
+- `search-mcp/src/search_mcp/auth.py:55-65`（`_is_authorized` の分岐）
+
+### 期待結果
+新規テストが通り、`settings.py` と `auth.py` のカバレッジが 100% になる。
+
+### 実際の結果
+期待どおり。両スイートとも初回実行で全件成功した。
+`search_demo.py` の未到達は 230 行目（`if __name__ == "__main__"` ガード）のみ。
+`search_mcp/__main__.py` は 0% のままだが、ここは uvicorn の起動処理で、
+E2E（Phase 14）が実際にコンテナを起動して通している。
+
+### 解釈
+事実: 単体テスト総数は 9 → 76 件になった。
+事実: 既存コードのバグは 1 件も見つからなかった。全テストが初回で通っている。
+
+推測: バグが出なかったのは、`search_demo.py` が小さく（102 文）、
+標準ライブラリだけで書かれていて分岐が浅いため。
+ただしこれらのテストの価値は「今バグを見つけること」より
+**回帰を防ぐこと**にある。特に 4 ソースの件数パラメータ名は
+API ごとに違い（`srlimit` / `hitsPerPage` / `per_page` / `pagesize`）、
+コピー&ペーストで取り違えやすい箇所だった。
+
+事実: `test_unset_booleans_keep_their_default` が示すとおり、
+`MCP_STATELESS_HTTP=""`（空文字で設定）は未設定とは異なり false になる。
+Kubernetes の ConfigMap で値を空にしたまま残すと stateless が無効化される。
+これは意図した挙動だが、マニフェストを書く際の落とし穴になる。
+
+### 次の判断
+README 3 箇所（ルート / search-mcp / search-demo）の検証状況を更新し、
+コミットして push する。

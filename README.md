@@ -87,6 +87,7 @@ mcp-demo/
 ├── Containerfile              UBI9 マルチステージ（build context はリポジトリルート）
 ├── search-demo/               Skill 版。標準ライブラリのみ
 │   ├── search_demo.py
+│   ├── tests/                 38 件（urlopen を差し替え、ネットワークに出ない）
 │   ├── .opencode/skill/public-api-search/SKILL.md
 │   └── .tracecraft/           作業記録
 └── search-mcp/                MCP 版
@@ -94,7 +95,7 @@ mcp-demo/
     ├── docs/                  移植知識・配備・接続・セキュリティ
     ├── examples/              smoke_client.py / opencode.json / agent-pod.yaml
     ├── deploy/openshift/      kustomize 一式（12 リソース）
-    └── tests/                 9 件
+    └── tests/                 単体 38 件 + e2e/run-e2e.sh 36 チェック
 ```
 
 ---
@@ -103,7 +104,8 @@ mcp-demo/
 
 | | |
 |---|---|
-| 単体テスト 9 件 | ✅ `cd search-mcp && uv run pytest -q` |
+| 単体テスト 76 件 | ✅ `cd search-mcp && uv run pytest -q`（38 件）<br>✅ `cd search-demo && uv run --extra dev pytest -q`（38 件） |
+| カバレッジ | ✅ `search_demo.py` 99% / `search_mcp` 94%（残りは uvicorn 起動部で E2E 側） |
 | **E2E テスト 36 件** | ✅ `search-mcp/tests/e2e/run-e2e.sh` |
 | コンテナ起動 | ✅ 任意 UID（1000670000）/ read-only rootfs / cap-drop ALL |
 | 本番設定の経路 | ✅ `MCP_JSON_RESPONSE=true` と DNS rebinding 保護を実際に通した |

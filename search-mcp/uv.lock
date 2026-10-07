@@ -891,6 +891,10 @@ name = "search-demo"
 version = "1.0.0"
 source = { directory = "../search-demo" }
 
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=8" }]
+provides-extras = ["dev"]
+
 [[package]]
 name = "search-mcp"
 version = "1.0.0"

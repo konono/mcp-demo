@@ -383,3 +383,49 @@ E2E テストの Phase 5 として恒久化した
 - **API スキーマ検証にはならない。** podman は自前のパーサで解釈しており、
   Kubernetes/OpenShift の admission による検証とは別物。
   フィールド名の typo は依然として検出できない
+
+---
+
+## Finding: 環境変数の「未設定」と「空文字」は別の意味になる
+
+### 調べた理由
+`Settings.from_env()` のテストを書く際、既定値 `True` の項目
+（`stateless_http` / `enable_dns_rebinding_protection`）について
+ConfigMap で `MCP_STATELESS_HTTP: ""` と書いた場合にどうなるか確認が要った。
+Kubernetes の ConfigMap では「キーを消す」と「値を空にする」が混同されやすい。
+
+### 調査方法
+`search-mcp/src/search_mcp/settings.py:17-21` の `_bool` を読み、
+`test_unset_booleans_keep_their_default` で両方の経路を実行して比較した。
+
+### わかった事実
+- `_bool` は `os.environ.get(name)` が `None`（未設定）のときだけ既定値を返す。
+- 空文字は `"".strip().lower() in {"1","true","yes","on"}` が偽になるため
+  **false** になる。既定値には戻らない。
+- 結果として `MCP_STATELESS_HTTP: ""` を ConfigMap に残すと
+  stateless が無効化され、セッションがプロセスに乗る。
+  `replicas: 2` のままだとロードバランス先によってセッションが見つからなくなる。
+
+### 根拠
+`search-mcp/src/search_mcp/settings.py:17-21`
+
+```python
+def _bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+```
+
+`search-mcp/tests/test_settings.py::test_unset_booleans_keep_their_default` が
+未設定で `True`、空文字で `False` になることを実行して確認している（38 passed）。
+
+### 作業への影響
+挙動自体は意図どおりなので変更しない。
+「値を空にする」のではなく「キーごと消す」ことを前提にした設計である。
+ただし落とし穴なのでテストで固定し、worklog Step 15 に記録した。
+
+### 未確認事項
+`deploy/openshift/configmap.yaml` の各キーについて、
+運用中に値を空にする運用が実際にあり得るかは未検討。
+現在のマニフェストは全キーに明示的な値を入れているため、この経路には入らない。

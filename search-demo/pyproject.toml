@@ -12,6 +12,10 @@ requires-python = ">=3.10"
 # 依存ゼロ（標準ライブラリのみ）。エージェントが pip install を挟まずに即実行できるようにするため。
 dependencies = []
 
+# テストにだけ pytest が要る。実行時の依存ゼロは崩さない。
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
 [project.scripts]
 search-demo = "search_demo:main"
 

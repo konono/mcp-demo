@@ -6,6 +6,7 @@
 
 ```
 search_demo.py                                 # 本体（標準ライブラリのみ・認証不要）
+tests/test_search_demo.py                      # 単体テスト（pytest）
 .opencode/skill/public-api-search/SKILL.md     # opencode 用 Skill 定義
 ```
 
@@ -32,6 +33,19 @@ Python 3.10+ が必要。このリポジトリでは mise で用意している:
 mise use python@3.12
 mise x -- python search_demo.py "asyncio" -f text
 ```
+
+## テスト
+
+```bash
+uv run --extra dev pytest      # 38 件
+```
+
+`urllib.request.urlopen` を差し替えているのでネットワークには出ない。
+各 API のレスポンス形（欠けたフィールド、null の `description`、HTML エスケープ）
+と、部分的な失敗が `errors` に落ちることを見ている。
+
+pytest は `[project.optional-dependencies] dev` にだけ入れてある。
+実行時の依存ゼロという性質は崩していない。
 
 ## opencode から使う
 

@@ -376,3 +376,45 @@ MCP 版は**共有サーバー**で、1 クライアントの `limit=1000` が�
 
 ### 見直し条件
 クラスタにアクセスできるようになったら即座に `oc apply --dry-run=server` を実行する。
+
+---
+
+## Decision: pytest を search-demo の dev extra に置き、実行時依存ゼロを維持する
+
+### 背景
+`search_demo.py` は「エージェントが `pip install` を挟まずに即実行できる」ことを
+売りにして依存ゼロで書いてある。一方で単体テストを入れるには pytest が要る。
+
+### 選択肢
+1. `[project.optional-dependencies] dev = ["pytest>=8"]` に置く
+2. `dependencies` に直接入れる
+3. 標準ライブラリの `unittest` で書き、依存を一切増やさない
+4. テストを `search-mcp` 側に置き、`search-demo` のパッケージ構成を触らない
+
+### 採用した案
+1（dev extra）。
+
+### 採用理由
+- `dependencies = []` が保たれるので、`python3 search_demo.py` は
+  今までどおり何もインストールせずに動く。README の主張が崩れない。
+- `uv run --extra dev pytest` という 1 行でテストできる。
+- `search-mcp` 側は既に pytest を使っており、書き方を揃えられる。
+
+### 採用しなかった案と理由
+- 2: 実行時に不要なものを必須依存にすると、売りである「即実行」が崩れる。
+- 3: `unittest` でも書けるが、`parametrize` が無いので
+  「4 ソース × レスポンス形のバリエーション」が冗長になる。
+  テストの読みやすさはリファレンス実装としての価値に直結するため避けた。
+- 4: 検索ロジックのテストが別パッケージにあると、
+  `search_demo.py` だけを取り出して使う人がテストを見つけられない。
+  また `search-demo` を単体で CI に掛けられなくなる。
+
+### トレードオフ
+`search-demo` に `.venv` と `uv.lock` が増える（`.gitignore` 済み）。
+テストを実行する人にだけ uv / pytest が必要になり、
+「標準ライブラリだけで完結」という性質はテスト実行時には成り立たない。
+
+### 見直し条件
+`search-demo` を sdist / wheel として外部に配る必要が出た場合。
+その際は `[tool.hatch.build.targets.sdist]` に `tests/` を含めるか判断する
+（現状は `search_demo.py` / `README.md` / `mise.toml` のみに絞っている）。

@@ -1029,3 +1029,114 @@ $ cd search-mcp && uv run pytest -q
 .........                                                                [100%]
 9 passed in 2.67s
 ```
+
+---
+
+## Phase 15: 単体テストの穴埋め
+
+### テストの新規作成
+
+- `search-demo/tests/test_search_demo.py`（新規・38 件）
+- `search-mcp/tests/test_settings.py`（新規・27 件）
+- `search-mcp/tests/test_server.py`（2 件追記）
+- `search-demo/pyproject.toml` に dev extra を追加
+
+### search-demo のテスト実行
+
+```console
+$ cd /Users/kono/gitrepo/mcp-demo/search-demo && uv run --extra dev pytest -q
+Using CPython 3.12.15 interpreter at: /home/agent/.local/share/mise/installs/python/3.12/bin/python3
+Creating virtual environment at: .venv
+   Building search-demo @ file:///Users/kono/gitrepo/mcp-demo/search-demo
+      Built search-demo @ file:///Users/kono/gitrepo/mcp-demo/search-demo
+warning: Failed to hardlink files; falling back to full copy.
+Installed 6 packages in 244ms
+......................................                                   [100%]
+38 passed in 0.04s
+```
+
+### search-mcp のテスト実行
+
+```console
+$ cd /Users/kono/gitrepo/mcp-demo/search-mcp && uv run pytest -q
+   Building search-demo @ file:///Users/kono/gitrepo/mcp-demo/search-demo
+      Built search-demo @ file:///Users/kono/gitrepo/mcp-demo/search-demo
+Uninstalled 1 package in 2ms
+Installed 1 package in 7ms
+....................................                                     [100%]
+36 passed in 2.70s
+```
+
+（この時点では test_server.py への追記前。36 = 既存 9 + settings 27）
+
+### カバレッジ計測
+
+```console
+$ cd search-mcp && uv run --with pytest-cov pytest -q --cov=search_mcp --cov-report=term-missing
+....................................                                     [100%]
+Name                         Stmts   Miss  Cover   Missing
+----------------------------------------------------------
+src/search_mcp/__init__.py       5      0   100%
+src/search_mcp/__main__.py       9      9     0%   7-32
+src/search_mcp/app.py           27      0   100%
+src/search_mcp/auth.py          34      1    97%   62
+src/search_mcp/server.py        45      0   100%
+src/search_mcp/settings.py      27      0   100%
+----------------------------------------------------------
+TOTAL                          147     10    93%
+36 passed in 3.12s
+
+$ cd search-demo && uv run --extra dev --with pytest-cov pytest -q --cov=search_demo --cov-report=term-missing
+......................................                                   [100%]
+Name             Stmts   Miss  Cover   Missing
+----------------------------------------------
+search_demo.py     102      1    99%   230
+----------------------------------------------
+TOTAL              102      1    99%
+38 passed in 0.08s
+```
+
+`auth.py:62` が未到達だったため該当箇所を確認:
+
+```console
+$ (search-mcp/src/search_mcp/auth.py:55-65 を Read)
+    def _is_authorized(self, scope: Scope) -> bool:
+        for raw_name, raw_value in scope.get("headers", []):
+            if raw_name.lower() != b"authorization":
+                continue
+            value = raw_value.decode("latin-1")
+            scheme, _, token = value.partition(" ")
+            if scheme.lower() != "bearer":
+                return False          # <- 62 行目。Bearer 以外のスキーム
+            return any(hmac.compare_digest(token.strip(), known) for known in self.tokens)
+        return False
+```
+
+`test_non_bearer_schemes_are_rejected` と
+`test_lowercase_bearer_is_accepted` を追記して再計測:
+
+```console
+$ cd search-mcp && uv run --with pytest-cov pytest -q --cov=search_mcp --cov-report=term-missing
+......................................                                   [100%]
+Name                         Stmts   Miss  Cover   Missing
+----------------------------------------------------------
+src/search_mcp/__init__.py       5      0   100%
+src/search_mcp/__main__.py       9      9     0%   7-32
+src/search_mcp/app.py           27      0   100%
+src/search_mcp/auth.py          34      0   100%
+src/search_mcp/server.py        45      0   100%
+src/search_mcp/settings.py      27      0   100%
+----------------------------------------------------------
+TOTAL                          147      9    94%
+38 passed in 3.70s
+```
+
+残る `__main__.py` 7-32 行は uvicorn の起動処理。Phase 14 の E2E で
+実際にコンテナを起動して通しているため、単体では追わない。
+
+### ドキュメント更新
+
+- `README.md`（ルート）: 検証状況の表を「単体テスト 76 件」に更新、
+  カバレッジ行を追加、構成ツリーに `search-demo/tests/` を追記
+- `search-mcp/README.md`: テスト節に単体テストの内訳表を追加
+- `search-demo/README.md`: テスト節を新設、構成に `tests/` を追記
