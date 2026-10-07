@@ -1685,3 +1685,158 @@ INFO:     127.0.0.1:45814 - "GET /.well-known/openid-configuration HTTP/1.1" 401
 INFO:     127.0.0.1:45814 - "POST /register HTTP/1.1" 401 Unauthorized
 --- total 401s: 12
 ```
+
+---
+
+## Phase 20: コンテナ起動と opencode からの接続
+
+### 20-1. podman が消えていたので再セットアップ
+
+```
+$ podman images
+/bin/bash: line 1: podman: command not found
+
+$ mise install
+mise ⇢ podman@6.1.3     0ms · already installed
+mise all tools are installed
+
+$ P=$(mise where podman); ls $P
+bin
+podman-remote
+```
+
+CLAUDE.md の手順（`ln -sf ../podman-remote-static-linux_* podman`）は
+glob が一致せずリンク切れになっていた。実体名に合わせて張り直した。
+
+```
+$ ln -sf ../podman-remote $P/bin/podman && mise reshim && podman version
+Client:       Podman Engine
+Version:      6.1.3
+API Version:  6.1.3
+```
+
+### 20-2. イメージのビルド
+
+```
+$ podman build -f Containerfile -t search-mcp:1.0.0 .
+...
+[2/2] STEP 5/8: USER 1001
+[2/2] STEP 8/8: ENTRYPOINT ["search-mcp"]
+Successfully tagged localhost/search-mcp:1.0.0
+48aefb0acecf38c585278cc2b258795cf84f47e288c2ac0c7aba0bb926039b68
+```
+
+警告（既知・無害）:
+
+```
+level=warning msg="HEALTHCHECK is not supported for OCI image format and will be ignored. Must use `docker` format"
+```
+
+### 20-3. 到達性の確認（publish vs コンテナ IP）
+
+```
+$ podman run -d --name search-mcp -p 18080:8080 \
+    -e MCP_AUTH_TOKENS=container-token -e MCP_JSON_RESPONSE=true search-mcp:1.0.0
+$ podman inspect search-mcp --format '{{.NetworkSettings.IPAddress}}'
+10.88.0.28
+
+$ curl -s -m 5 -o /dev/null -w "healthz=%{http_code}\n" http://10.88.0.28:8080/healthz
+healthz=200
+$ curl -s -m 5 -o /dev/null -w "healthz=%{http_code}\n" http://127.0.0.1:18080/healthz
+healthz=000
+```
+
+publish したポートには到達できない（DooD 構成）。コンテナ IP なら到達する。
+
+### 20-4. 固定 IP + SCC 相当の制約 + DNS rebinding 保護 有効で起動
+
+```
+$ podman network create --subnet 10.89.7.0/24 mcp-net
+$ podman run -d --name search-mcp --network mcp-net --ip 10.89.7.10 \
+    --user 1000670000:0 --read-only --tmpfs /tmp \
+    --cap-drop ALL --security-opt no-new-privileges \
+    -e MCP_AUTH_TOKENS=container-token \
+    -e MCP_JSON_RESPONSE=true \
+    -e MCP_DNS_REBINDING_PROTECTION=true \
+    -e MCP_ALLOWED_HOSTS=10.89.7.10:8080 \
+    search-mcp:1.0.0
+
+$ podman logs search-mcp | tail -2
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+
+$ curl -s -m 5 -o /dev/null -w "healthz=%{http_code}\n" http://10.89.7.10:8080/healthz
+healthz=200
+$ curl -s -m 5 -o /dev/null -w "no-auth /mcp=%{http_code}\n" -X POST http://10.89.7.10:8080/mcp -d '{}'
+no-auth /mcp=401
+```
+
+### 20-5. opencode から接続
+
+`~/oc-mcp-test/opencode.json` の `mcp.search.url` を
+`http://10.89.7.10:8080/mcp`、`headers.Authorization` を
+`Bearer {env:SEARCH_MCP_TOKEN}` にした。
+
+```
+$ SEARCH_MCP_TOKEN=container-token opencode run --auto "search ツールで GitHub から 'kubernetes operator' を 3 件検索して、名前と URL を列挙して。"
+> build · qwen36-35b-a3b
+⚙ search_search {"query":"kubernetes operator","sources":["github"],"limit":3}
+1. **prometheus-operator/prometheus-operator** — https://github.com/prometheus-operator/prometheus-operator
+2. **cloudnative-pg/cloudnative-pg** — https://github.com/cloudnative-pg/cloudnative-pg
+3. **chaos-mesh/chaos-mesh** — https://github.com/chaos-mesh/chaos-mesh
+```
+
+コンテナ側ログ:
+
+```
+INFO:     10.89.7.1:42932 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     10.89.7.1:42948 - "POST /mcp HTTP/1.1" 200 OK
+2026-10-07 05:41:15,386 INFO search_mcp.server search query='kubernetes operator' sources=['github'] limit=3 lang=ja
+INFO:     10.89.7.1:42948 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     10.89.7.1:42948 - "POST /mcp HTTP/1.1" 202 Accepted
+```
+
+### 20-6. Host 検証（400 と 421 の違い）
+
+```
+$ curl -s -m 5 -o /dev/null -w "Host=evil.example.com -> %{http_code}\n" \
+    -X POST http://10.89.7.10:8080/mcp -H "Host: evil.example.com" \
+    -H "Authorization: Bearer container-token" -d '{}'
+Host=evil.example.com -> 400
+
+$ curl -s -m 5 -o /dev/null -w "Host=evil.example.com /healthz -> %{http_code}\n" \
+    http://10.89.7.10:8080/healthz -H "Host: evil.example.com"
+Host=evil.example.com /healthz -> 200
+```
+
+`Accept` を付けて再実行:
+
+```
+$ curl -s -m 5 -i -X POST http://10.89.7.10:8080/mcp -H "Host: evil.example.com" \
+    -H "Authorization: Bearer container-token" -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+HTTP/1.1 421 Misdirected Request
+date: Wed, 07 Oct 2026 05:41:32 GMT
+server: uvicorn
+content-length: 19
+
+Invalid Host header
+```
+
+許可済み Host で同じリクエスト:
+
+```
+200
+```
+
+### 20-7. 実行 UID と rootfs
+
+```
+$ podman exec search-mcp id
+uid=1000670000(1000670000) gid=0(root) groups=0(root)
+
+$ podman exec search-mcp sh -c 'touch /nope 2>&1 || echo "rootfs read-only: OK"'
+touch: cannot touch '/nope': Read-only file system
+rootfs read-only: OK
+```

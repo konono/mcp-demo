@@ -1383,3 +1383,103 @@ MCP 仕様の該当箇所を確認していないため断定しない。
 §1.8（認証失敗が無言になる件）を追加し、§3 の切り分け表に 2 行足した。
 README の検証状況にも 1 段落追加した。Route 経由（TLS + 外部ホスト名）は
 依然として未検証なので、その旨を明記した。
+
+---
+
+## Step 20: コンテナで起動した search-mcp に opencode から接続する
+
+### 目的
+
+Step 19 はローカルプロセス（`uv run search-mcp`、DNS rebinding 保護 無効）への
+接続だった。本番に近い構成——コンテナ、SCC 相当の制約、保護 有効——でも
+opencode から使えることを確認する。あわせて、動いた `opencode.json` を
+リポジトリに残す。
+
+### 背景
+
+ユーザーから「次は mcp を container で動かしてアクセスさせてください。
+また接続が出来た opencode.json も repository に保存しておいてください」と依頼された。
+
+### 事前仮説
+
+コンテナ化自体は E2E で確認済みなので起動はする。
+ただし DooD 構成のため、publish したポートには
+この環境（opencode を動かす側）から届かない可能性が高い。
+
+### 実行内容
+
+**変更・操作**
+
+1. コンテナが作り直されており `podman` が消えていた。`mise install` 後、
+   shim 名を修正した。CLAUDE.md の手順にある
+   `ln -sf ../podman-remote-static-linux_* podman` は**このマシンでは効かず**、
+   実体が `podman-remote` だったため `ln -sf ../podman-remote bin/podman` にした。
+2. `podman build -f Containerfile -t search-mcp:1.0.0 .` でビルドした。
+3. まず `-p 18080:8080` で起動し、到達性を 2 経路で測った。
+4. 専用ネットワーク `mcp-net`（`10.89.7.0/24`）を作り、IP を `10.89.7.10` に固定して
+   SCC 相当の制約と DNS rebinding 保護 有効で起動し直した。
+5. `~/oc-mcp-test/opencode.json` の URL をコンテナ IP に向けて opencode を実行した。
+6. Host 検証、実行 UID、rootfs の読み取り専用性を確認した。
+7. 動いた設定を `search-mcp/examples/opencode.local.json` として保存し、
+   再現手順を `search-mcp/examples/README.md` に書いた。
+
+**観察した出力**
+
+- 到達性:
+  `curl http://10.88.0.28:8080/healthz` → `200`（コンテナ IP 直指定）
+  `curl http://127.0.0.1:18080/healthz` → `000`（publish したポート、到達不能）
+- 固定 IP での起動後: `/healthz` → 200、`POST /mcp`（認証なし）→ 401
+- opencode 実行:
+  `⚙ search_search {"query":"kubernetes operator","sources":["github"],"limit":3}`
+  に続き prometheus-operator / cloudnative-pg / chaos-mesh が返った。
+- コンテナログ:
+  `2026-10-07 05:41:15,386 INFO search_mcp.server search query='kubernetes operator' sources=['github'] limit=3 lang=ja`
+  および `POST /mcp HTTP/1.1" 200 OK` / `202 Accepted`
+- `podman exec search-mcp id` → `uid=1000670000(1000670000) gid=0(root) groups=0(root)`
+- `touch /nope` → `Read-only file system`
+- 許可外 Host:
+  `-d '{}'` だけだと **400**。
+  `Accept: application/json, text/event-stream` まで付けると
+  **`421 Misdirected Request` / `Invalid Host header`**。
+  `/healthz` は許可外 Host でも 200。
+
+**参照した情報源**
+
+- `/Users/kono/gitrepo/mcp-demo/Containerfile`
+- `/Users/kono/gitrepo/mcp-demo/mise.toml`
+- `/home/agent/.claude/CLAUDE.md`（podman shim 修正手順）
+
+### 期待結果
+
+コンテナでも opencode から使える。publish したポートには届かない。
+
+### 実際の結果
+
+どちらも想定どおり。加えて 421 の確認手順に落とし穴が 1 つ見つかった。
+
+### 解釈
+
+**事実**: DNS rebinding 保護を**有効にしたまま** opencode から使えた。
+Step 19 は保護を切っていたので、本番構成に一歩近づいた確認になった。
+
+**事実**: 許可外 Host で最初 400 が返ったのは、保護が効いていないからではなく、
+`Accept` ヘッダが無いリクエストが Host 検証より**先に**弾かれたため。
+正しいヘッダを付ければ 421 が返る。
+既存の Finding「`421 Misdirected Request` を返す」は正しかったが、
+**それを確認する手順**がドキュメントに無かった。
+`docs/clients.md` §1.5 の疎通確認は `-d '{}'` を使っており、
+認証（401）の確認には使えるが Host 検証の確認には使えない。
+
+**事実**: CLAUDE.md に書かれた podman shim の修正コマンドは、
+この環境の podman 6.1.3 では動かなかった（実体名が異なる）。
+
+**推測**: publish したポートに届かないのは DooD 構成で
+ポートがホスト側の netns に出るためと考えるが、
+ホスト側のネットワーク設定を確認していないため断定しない。
+回避策（コンテナ IP 直指定）が機能しているので深追いしていない。
+
+### 次の判断
+
+`examples/opencode.local.json` と `examples/README.md` を追加し、
+`docs/clients.md` §1.6 にコンテナ構成の確認結果と §1.6.1（421 の確認手順）を追加、
+README の検証状況を更新した。Route 経由は依然未検証なので明記した。

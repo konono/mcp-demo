@@ -7,3 +7,5 @@ uv = "0.12.23"
 podman = "6.1.3"
 # OpenShift マニフェストの kustomize build / 検証に使う。
 kubectl = "latest"
+# MCP クライアントとしての接続検証に使う（search-mcp/examples/README.md の手順）。
+opencode = "1.18.34"

@@ -791,3 +791,128 @@ opencode の標準出力。Step 19 の worklog に全文を記録した。
 - クラスタ内 Pod の agent framework（§2）からの接続も未検証のまま。
 - `list_search_sources` ツールは呼ばせていない。
 - 自動テスト化していない。手動検証であり、CI では回らない。
+
+---
+
+## Finding: 許可外 Host の 421 は、正しい Accept ヘッダを付けないと観測できない
+
+### 調べた理由
+
+コンテナを DNS rebinding 保護 有効で起動し、許可外 Host で `/mcp` を叩いたところ
+**400** が返った。既存の Finding では 421 を観測しているため矛盾する。
+保護が効いていないのか、観測方法が悪いのかを切り分ける必要があった。
+
+### 調査方法
+
+同じ許可外 Host に対して、ヘッダを変えて 2 回リクエストした。
+
+```bash
+# 1 回目
+curl -X POST http://10.89.7.10:8080/mcp -H 'Host: evil.example.com' \
+  -H 'Authorization: Bearer container-token' -d '{}'
+
+# 2 回目（Content-Type と Accept を追加）
+curl -X POST http://10.89.7.10:8080/mcp -H 'Host: evil.example.com' \
+  -H 'Authorization: Bearer container-token' \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+### わかった事実
+
+1. 1 回目は `400`。2 回目は `421 Misdirected Request` / `Invalid Host header`。
+2. 同じリクエストを許可済み Host で投げると `200`。
+3. したがって保護は正しく機能しており、
+   **`Accept` を欠いたリクエストが Host 検証より先に 400 で弾かれていた**だけ。
+4. ミドルウェアの順序は、認証（401）が最も外側。
+   認証は `-d '{}'` だけのリクエストでも確認できる（実際 401 が返る）。
+   Host 検証は Streamable HTTP の層にあるため、そこまで到達させる必要がある。
+
+### 根拠
+
+Phase 20 の実行ログ。レスポンスヘッダ全文:
+
+```
+HTTP/1.1 421 Misdirected Request
+server: uvicorn
+content-length: 19
+
+Invalid Host header
+```
+
+### 作業への影響
+
+既存の Finding「`MCP_ALLOWED_HOSTS` が合っていないと 421 を返す」は**正しい**。
+訂正は不要。足りなかったのは**確認手順**のほうで、
+`docs/clients.md` §1.5 の疎通確認は `-d '{}'` を使っており、
+これを Host 検証の確認に流用すると 400 を見て誤った結論に至る。
+
+`docs/clients.md` に §1.6.1 として確認手順を追加し、
+`examples/README.md` にも同じ注意を書いた。
+
+### 未確認事項
+
+- Streamable HTTP の層で 400 を返している正確な位置（SDK のどのコード）は
+  特定していない。`Accept` の欠落が原因であることは実験から言えるが、
+  SDK のソースは読んでいない。
+
+---
+
+## Finding: コンテナ構成でも、DNS rebinding 保護を有効にしたまま opencode から使える
+
+### 調べた理由
+
+Step 19 の検証は `uv run search-mcp` によるローカルプロセスで、
+`MCP_DNS_REBINDING_PROTECTION=false` にしていた。
+本番は保護 有効・コンテナ・任意 UID で動く。構成差が残っていた。
+
+### 調査方法
+
+専用ネットワーク `mcp-net`（`10.89.7.0/24`）を作り、IP を `10.89.7.10` に固定して
+OpenShift の `restricted-v2` SCC 相当の制約つきで起動した。
+
+```bash
+podman run -d --name search-mcp --network mcp-net --ip 10.89.7.10 \
+  --user 1000670000:0 --read-only --tmpfs /tmp \
+  --cap-drop ALL --security-opt no-new-privileges \
+  -e MCP_AUTH_TOKENS=container-token \
+  -e MCP_JSON_RESPONSE=true \
+  -e MCP_DNS_REBINDING_PROTECTION=true \
+  -e MCP_ALLOWED_HOSTS=10.89.7.10:8080 \
+  search-mcp:1.0.0
+```
+
+IP を固定したのは、`MCP_ALLOWED_HOSTS` に接続先を書く必要があり、
+起動のたびに IP が変わると設定できないため。
+
+### わかった事実
+
+1. opencode から `search_search` が呼べた。
+   コンテナログに
+   `INFO search_mcp.server search query='kubernetes operator' sources=['github'] limit=3 lang=ja`。
+2. `podman exec search-mcp id` → `uid=1000670000(1000670000) gid=0(root)`。
+   Containerfile の `USER 1001` ではなく、`--user` で与えた任意 UID で動いている。
+3. `touch /nope` → `Read-only file system`。rootfs は読み取り専用。
+4. 許可外 Host は 421 で弾かれ、`/healthz` は許可外 Host でも 200。
+5. **DooD 構成では publish したポートに届かない。**
+   `-p 18080:8080` で起動しても `curl http://127.0.0.1:18080/healthz` は
+   `000`（接続失敗）。コンテナ IP 直指定（`http://10.88.0.28:8080/healthz`）なら 200。
+
+### 根拠
+
+Phase 20 の実行ログ。`podman logs` / `podman exec` / `curl -w '%{http_code}'` の出力。
+
+### 作業への影響
+
+本番構成との残り差分は **Route（TLS 終端 + 外部ホスト名 + Router のタイムアウト）**
+だけになった。`examples/opencode.local.json` と `examples/README.md` に
+動いた設定と再現手順を残した。
+
+### 未確認事項
+
+- Route 経由は未検証。TLS 終端、`haproxy.router.openshift.io/timeout`、
+  外部ホスト名での `MCP_ALLOWED_HOSTS` はいずれも試せていない。
+- publish したポートに届かない理由は DooD 構成と推測しているが、
+  ホスト側のネットワーク設定は確認していない。
+- `list_search_sources` ツールはコンテナ構成でも呼んでいない。

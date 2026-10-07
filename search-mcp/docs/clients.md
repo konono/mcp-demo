@@ -94,8 +94,17 @@ curl -s "https://$HOST/mcp" \
 ### 1.6 検証状況（opencode 1.18.34 で実機確認済み）
 
 この節の設定は**実際に opencode から接続して確認してあります**。
-確認環境: opencode 1.18.34 / モデル `qwen36-35b-a3b`（OpenAI 互換ゲートウェイ）/
-`search-mcp` をローカルの `127.0.0.1:8080` で起動。
+確認環境: opencode 1.18.34 / モデル `qwen36-35b-a3b`（OpenAI 互換ゲートウェイ）。
+サーバー側は 2 通りで確認しました。
+
+1. `uv run search-mcp` でローカル起動（`127.0.0.1:8080`、DNS rebinding 保護 無効）
+2. **コンテナ**（`podman run`、固定 IP `10.89.7.10:8080`、**DNS rebinding 保護 有効**、
+   OpenShift の `restricted-v2` SCC 相当の制約つき:
+   `--user 1000670000:0 --read-only --cap-drop ALL --security-opt no-new-privileges`）
+
+2 のほうが本番に近い構成です。再現手順は
+[../examples/README.md](../examples/README.md)、設定は
+[../examples/opencode.local.json](../examples/opencode.local.json)。
 
 | 確認したこと | 結果 |
 |---|---|
@@ -116,7 +125,37 @@ limit
 `docs/skill-to-mcp.md` の前提（description は「お願い」、スキーマは「強制」）が、
 実クライアント経由で成立していることをここで確認しています。
 
-未確認: Route 経由（TLS + 外部ホスト名）での接続。上記はすべて平文の localhost です。
+コンテナ構成（上記 2）では、加えて次も確認しました。
+
+| 確認したこと | 結果 |
+|---|---|
+| 任意 UID / read-only rootfs で起動する | ✅ `uid=1000670000(1000670000) gid=0(root)`、`/` への書き込みは拒否 |
+| **DNS rebinding 保護 有効のまま opencode から使える** | ✅ `MCP_ALLOWED_HOSTS=10.89.7.10:8080` |
+| 許可外 Host は弾かれる | ✅ `421 Misdirected Request` / `Invalid Host header` |
+| `/healthz` は Host 検証を受けない | ✅ 許可外 Host でも 200 |
+
+未確認: **Route 経由（TLS + 外部ホスト名 + OpenShift Router）**。
+上記はすべて平文 HTTP です。TLS 終端と Router のタイムアウトは試せていません。
+
+### 1.6.1 Host 検証を curl で試すときの注意
+
+不正なリクエストは **Host 検証より先に 400 で弾かれます。**
+`-d '{}'` だけで投げると 421 ではなく 400 が返り、
+「保護が効いていない」と誤読します。`Accept` まで正しく付けてください。
+
+```bash
+# 400。Host 検証に到達していない
+curl -X POST "http://$HOST/mcp" -H 'Host: evil.example.com' -d '{}'
+
+# 421 Misdirected Request / Invalid Host header
+curl -X POST "http://$HOST/mcp" -H 'Host: evil.example.com' \
+  -H "Authorization: Bearer $SEARCH_MCP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+認証（401）のほうは最も外側のミドルウェアなので `-d '{}'` でも確認できます。
 
 ### 1.7 ツール名にサーバー名の接頭辞が付く
 
