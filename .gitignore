@@ -14,3 +14,5 @@ build/
 # Local secrets (secret.example.yaml is a placeholder and IS tracked)
 *.secret.yaml
 .env
+.coverage
+htmlcov/
