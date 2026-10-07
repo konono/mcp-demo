@@ -41,6 +41,7 @@ virt 上の VM で動く opencode からも、クラスタ内の agent framework
 | [docs/deploy-openshift.md](docs/deploy-openshift.md) | ビルドから配備、設計判断（stateless にした理由など） |
 | [docs/clients.md](docs/clients.md) | VM 上の opencode / クラスタ内 Pod からの接続設定と切り分け表 |
 | [docs/security.md](docs/security.md) | 認証方式の選択理由、ローテーション手順、OAuth 2.1 への移行手順 |
+| [examples/README.md](examples/README.md) | **opencode から実際につないだ手順**と、どの設定が検証済みか |
 
 ## 構成
 
@@ -55,7 +56,11 @@ search-mcp/
     settings.py                     # 環境変数からの設定
     __main__.py                     # uvicorn 起動
   deploy/openshift/                 # kustomize 一式
-  examples/                         # opencode.json, agent-pod.yaml, smoke_client.py
+  examples/
+    opencode.local.json             # 実際に接続できた設定（検証済み）
+    opencode.json                   # Route 経由の例（未検証）
+    agent-pod.yaml, smoke_client.py
+    README.md                       # 再現手順と検証状況
   tests/test_server.py              # 実 HTTP でのプロトコルテスト（単体）
   tests/test_settings.py            # 環境変数パースの単体テスト
   tests/e2e/run-e2e.sh              # コンテナ・マニフェストまで含む E2E

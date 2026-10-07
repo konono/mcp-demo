@@ -45,6 +45,18 @@ SKILL.md の各記述が MCP のどこに落ちるのか、なぜ機械的な移
 最後に完成チェックリスト、という構成にしてある。
 30B 前後のモデルでも齟齬が出ないよう、判断を仰ぐのではなく表を引かせる形で書いた。
 
+**実機で試した。** Qwen3.6 35B A3B（OpenAI 互換ゲートウェイ経由）に
+別の Skill を移植させたところ、仕分け（STEP 3）で仕込んだ 4 つの罠のうち 3 つを正解し、
+生成したコードは SDK の落とし穴 5 項目をすべて回避した。
+散文の注意書き「一度に 5 都市程度まで」を `Field(le=5)` と関数内ガードの
+**両方**に落とし、理由まで書いていた。ここが移植の最難関にあたる。
+
+ただし**推論モデルでは thinking を切らないと失敗する。**
+`reasoning_content` は画面に出ないまま出力枠と応答時間を食い潰すため、
+ツール呼び出しの JSON が途中で壊れる。モデルの能力不足に見えるが設定の問題。
+効いたのは `chat_template_kwargs: {"enable_thinking": false}` だけだった
+（比較表は PROMPT.md の「実行環境の要件」）。
+
 ---
 
 ## ドキュメント
@@ -56,12 +68,13 @@ SKILL.md の各記述が MCP のどこに落ちるのか、なぜ機械的な移
 | [deploy-openshift.md](search-mcp/docs/deploy-openshift.md) | ビルドと OpenShift への配備 |
 | [clients.md](search-mcp/docs/clients.md) | VM 上の opencode / クラスタ内 Pod からの接続 |
 | [security.md](search-mcp/docs/security.md) | 認証の設計、トークンのローテーション、OAuth 2.1 への移行 |
+| [examples/README.md](search-mcp/examples/README.md) | **opencode から実際につないだ手順**と、動いた設定ファイル |
 | [search-mcp/README.md](search-mcp/README.md) | MCP サーバーの構成と環境変数 |
 
 ### 作業記録
 
 `search-demo/.tracecraft/` に、この実装を作る過程をそのまま残してある。
-成功した手順だけでなく、**失敗 9 件・判断 10 件・調査知見 8 件**を含む。
+成功した手順だけでなく、**失敗 12 件・判断 13 件・調査知見 18 件**を含む。
 
 | | |
 |---|---|
@@ -90,6 +103,28 @@ CLI 版だけ試すなら依存は要らない。
 python3 search-demo/search_demo.py "rust tui" -s github -n 3
 ```
 
+### opencode からつなぐ
+
+実際に接続できた設定が
+[`search-mcp/examples/opencode.local.json`](search-mcp/examples/opencode.local.json) にある。
+コンテナで起動して opencode から使うまでの手順は
+[`search-mcp/examples/README.md`](search-mcp/examples/README.md)。
+
+つながると、こう動く。
+
+```
+⚙ search_search {"query":"kubernetes operator","sources":["github"],"limit":3}
+1. prometheus-operator/prometheus-operator
+2. cloudnative-pg/cloudnative-pg
+3. chaos-mesh/chaos-mesh
+```
+
+**注意: トークンが違ってもエラーは出ない。** opencode は MCP の登録に失敗しても
+黙って続行し、`WebFetch` など別の手段で回答を作る。成功と区別がつかない。
+まず「利用可能な MCP ツールを列挙して」と聞いて `search_search` が出るか確かめること
+（ツール名にはサーバー名の接頭辞が付く）。詳細は
+[clients.md](search-mcp/docs/clients.md) §1.7〜1.8。
+
 ---
 
 ## 構成
@@ -106,7 +141,8 @@ mcp-demo/
 └── search-mcp/                MCP 版
     ├── src/search_mcp/        settings / server / auth / app
     ├── docs/                  移植知識・配備・接続・セキュリティ
-    ├── examples/              smoke_client.py / opencode.json / agent-pod.yaml
+    ├── examples/              opencode.local.json（検証済み）/ opencode.json
+    │                          smoke_client.py / agent-pod.yaml / README.md
     ├── deploy/openshift/      kustomize 一式（12 リソース）
     └── tests/                 単体 38 件 + e2e/run-e2e.sh 36 チェック
 ```
@@ -115,21 +151,59 @@ mcp-demo/
 
 ## 検証状況
 
+### 自動テスト
+
 | | |
 |---|---|
 | 単体テスト 76 件 | ✅ `cd search-mcp && uv run pytest -q`（38 件）<br>✅ `cd search-demo && uv run --extra dev pytest -q`（38 件） |
 | カバレッジ | ✅ `search_demo.py` 99% / `search_mcp` 94%（残りは uvicorn 起動部で E2E 側） |
-| **E2E テスト 36 件** | ✅ `search-mcp/tests/e2e/run-e2e.sh` |
+| **E2E 36 件** | ✅ `search-mcp/tests/e2e/run-e2e.sh` |
+
+### コンテナ・マニフェスト
+
+| | |
+|---|---|
 | コンテナ起動 | ✅ 任意 UID（1000670000）/ read-only rootfs / cap-drop ALL |
 | 本番設定の経路 | ✅ `MCP_JSON_RESPONSE=true` と DNS rebinding 保護を実際に通した |
 | Deployment の probe | ✅ `podman kube play` で healthy になることを確認 |
 | 実 API 疎通 | ✅ コンテナ内から GitHub 検索が返る |
 | kustomize レンダリング | ✅ 警告なしで 12 リソース |
-| **マニフェストの API スキーマ検証** | ❌ **未実施** |
-| Route / NetworkPolicy / HPA / PDB | ❌ podman では検証できない |
+| **マニフェストの API スキーマ検証** | ❌ **未実施**（クラスタが要る） |
+| Route / NetworkPolicy / HPA / PDB | ❌ podman に概念が無い |
+
+### 実クライアントからの接続（手動検証・CI では回らない）
+
+opencode 1.18.34 + Qwen3.6 35B A3B から、2 通りの構成で接続した。
+
+| | |
+|---|---|
+| ローカルプロセス（保護 無効） | ✅ 接続・ツール呼び出し |
+| **コンテナ（保護 有効・SCC 相当の制約つき）** | ✅ 接続・ツール呼び出し |
+| **スキーマ上限がクライアント経由でも効く** | ✅ `limit=100` が Pydantic に弾かれ、エラーがモデルまで届いた |
+| 許可外 Host の拒否 | ✅ `421 Misdirected Request` |
+| `/healthz` が Host 検証を受けない | ✅ probe 用に素通り |
+| **Route 経由（TLS + 外部ホスト名）** | ❌ **未検証** |
+| クラスタ内 Pod の agent framework | ❌ 未検証 |
+
+3 行目がこのリポジトリの主張の裏付けにあたる。
+「description はお願い、スキーマは強制」が実クライアント越しに成立している。
+
+### 生成 AI による移植（PROMPT.md）
+
+| | |
+|---|---|
+| STEP 3（仕分け） | ✅ 仕込んだ 4 つの罠のうち 3 つ正解 |
+| STEP 4〜5（コード生成） | ✅ SDK の落とし穴 5 項目をすべて回避 |
+| STEP 6〜9 | ❌ 未実行 |
+| 生成コードの起動・テスト | ❌ 未実施（構文検証もしていない） |
+
+1 回の試行であり、再現性は未確認。
+
+---
 
 E2E は DooD 環境でも動くよう、専用ネットワーク上のクライアントコンテナから
 curl する構成にしてある（publish したポートにはこのプロセスから到達できないため）。
+同じ理由で、opencode からの接続検証ではコンテナ IP を直接指定している。
 
 クラスタが無い環境で作ったため、マニフェストの**フィールド名の typo や
 apiVersion の誤りは検出できていない**。配備前に実クラスタで確認すること。
@@ -140,8 +214,17 @@ oc apply --dry-run=server -k search-mcp/deploy/openshift/
 
 ## 要件
 
-Python 3.12 / uv（`mise.toml` に記載）。MCP SDK は 2.x 系（`mcp>=2.3,<3`）。
+Python 3.12 / uv。MCP SDK は 2.x 系（`mcp>=2.3,<3`）。
 1.x とは API 非互換（`FastMCP` → `MCPServer`）。
+
+ツールは `mise.toml` に記載してある（`mise install` で揃う）。
+
+| | |
+|---|---|
+| python 3.12 / uv | 本体とテスト |
+| podman | イメージのビルドと動作確認（DooD 経由） |
+| kubectl | kustomize build |
+| opencode | MCP クライアントとしての接続検証 |
 
 ## ライセンス
 
